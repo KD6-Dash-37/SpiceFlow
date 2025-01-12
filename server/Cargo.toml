@@ -1,0 +1,22 @@
+[package]
+name = "spiceflow-server"
+version = "0.1.0"
+edition = "2021"
+
+[workspace.metadata.clippy]
+config-path = "clippy.toml"
+
+[dependencies]
+tokio = { version = "1.43.0", features = ["full"] }
+rustls = { version = "0.23.21", features = ["ring"] }
+tokio-tungstenite = { version = "0.26.1", features = ["rustls-tls-webpki-roots"]}
+tungstenite = "0.26.1"
+serde_json = "1.0.135"
+futures-util = "0.3"
+log = "0.4.22"
+env_logger = "0.11.6"
+dotenv = "0.15"
+serde = {version = "1.0.217", features = ["derive"]}
+flatbuffers = "24.12.23"
+zmq = "0.10.0"
+thiserror = "2.0.11"
