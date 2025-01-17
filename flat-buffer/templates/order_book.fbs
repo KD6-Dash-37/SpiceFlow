@@ -1,0 +1,12 @@
+table PriceLevel {
+    price: double;
+    size: double;
+}
+
+table OrderBook {
+    topic: string;
+    bids: [PriceLevel];
+    asks: [PriceLevel];
+}
+
+root_type OrderBook;

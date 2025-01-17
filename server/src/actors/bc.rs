@@ -1,6 +1,6 @@
-use super::order_book_generated::spiceflow::PriceLevelArgs;
 use crate::actors::ob::ProcessedOrderBookData;
-use crate::actors::order_book_generated::spiceflow::{OrderBook, OrderBookArgs, PriceLevel};
+use crate::gen_templates::order_book::{OrderBook, OrderBookArgs, PriceLevel, PriceLevelArgs};
+
 use ::log;
 use flatbuffers;
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
@@ -186,7 +186,6 @@ pub enum BroadcastError {
 mod tests {
     use super::*;
     use crate::actors::ob::{OrderedF64, ProcessedOrderBookData};
-    use crate::actors::order_book_generated::spiceflow::OrderBook;
     use crate::actors::stream_config::StreamConfig;
     use flatbuffers::root;
     use std::sync::Arc;

@@ -182,8 +182,8 @@ impl OrderBookActor {
                 log::error!("{}: Error in run loop: {:?}", self.name, err);
             }
             // Uncomment below to print best bid/ask in console
-            println!("best bid: {:?}", self.best_bid());
-            println!("best ask: {:?}", self.best_ask());
+            // println!("best bid: {:?}", self.best_bid());
+            // println!("best ask: {:?}", self.best_ask());
         }
     }
 

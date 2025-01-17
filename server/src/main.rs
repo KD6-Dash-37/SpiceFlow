@@ -1,11 +1,12 @@
 //! # SpiceFlow - Server - A Market Data Server
 
-mod actors;
-use actors::bc::BroadcastActor;
-use actors::ob::OrderBookActor;
-use actors::stream_config::StreamConfig;
-use actors::ws::WebSocketActor;
+// mod actors;
+// mod gen_templates;
 use dotenv::dotenv;
+use server::actors::bc::BroadcastActor;
+use server::actors::ob::OrderBookActor;
+use server::actors::stream_config::StreamConfig;
+use server::actors::ws::WebSocketActor;
 use tokio::sync::mpsc;
 
 #[tokio::main]
