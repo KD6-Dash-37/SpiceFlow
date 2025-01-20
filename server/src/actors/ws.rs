@@ -12,8 +12,6 @@ use tokio_tungstenite::{
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-// Temporary global instrument constant to be replaced in future iters
-
 #[derive(Debug)]
 pub enum WebSocketCommand {
     Resubscribe,
@@ -50,7 +48,7 @@ pub struct WebSocketActor {
     name: String,
     write: Option<SplitSink<WsStream, Message>>,
     read: Option<futures_util::stream::SplitStream<WsStream>>,
-    sender: mpsc::Sender<String>,
+    router: mpsc::Sender<String>,
     ws_command_receiver: mpsc::Receiver<WebSocketCommand>,
 }
 
@@ -58,15 +56,55 @@ impl WebSocketActor {
     // Creates a new WebSocketActor with a name and a list of channels to subscribe to.
     pub fn new(
         name: &str,
-        sender: mpsc::Sender<String>,
+        router: mpsc::Sender<String>,
         ws_command_receiver: mpsc::Receiver<WebSocketCommand>,
     ) -> Self {
         Self {
             name: name.to_string(),
             write: None,
             read: None,
-            sender,
+            router,
             ws_command_receiver,
+        }
+    }
+
+    pub async fn run(&mut self) {
+        self.create_ws_stream().await;
+        self.subscribe().await;
+
+        loop {
+            tokio::select! {
+                // Handle incoming commands from the WebSocket command receiver
+                Some(command) = self.ws_command_receiver.recv() => {
+                    self.handle_command(command).await;
+                }
+
+                // Continuously read and forward WebSocket messages
+                result = self.read.as_mut().unwrap().next() => {
+                    match result {
+                        // Handle the case where the stream returns `Some(Result::Ok)`
+                        Some(Ok(Message::Text(text))) => {
+                            if let Err(err) = self.router.send(text.to_string()).await {
+                                warn!("{}: Failed to forward message to OrderBookActor: {}", self.name, err);
+                            }
+                        }
+                        // Handle the case where the stream returns `Some(Result::Ok)` for other message types
+                        Some(Ok(other_message)) => {
+                            warn!("{}: Unhandled WebSocket message type: {:?}", self.name, other_message);
+                        }
+                        // Handle the case where the stream returns `Some(Result::Err)`
+                        Some(Err(err)) => {
+                            error!("{}: Error reading WS message: {}", self.name, err);
+                            break; // Exit the loop on WebSocket error
+                        }
+                        // Handle the case where the stream ends (`None`)
+                        None => {
+                            warn!("{}: WebSocket stream ended unexpectedly", self.name);
+                            break; // Exit the loop and reconnect
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -102,7 +140,7 @@ impl WebSocketActor {
             }
         }
     }
-    // vec!["book.BTC-PERPETUAL.100ms".to_string()]
+
     async fn subscribe(&mut self) {
         let config = StreamConfig::current();
         info!("{}: Subscribing to {}", self.name, config.internal_symbol);
@@ -245,46 +283,6 @@ impl WebSocketActor {
             }
         } else {
             error!("{}: Write stream is not initialised", self.name);
-        }
-    }
-
-    pub async fn run(&mut self) {
-        self.create_ws_stream().await;
-        self.subscribe().await;
-
-        loop {
-            tokio::select! {
-                // Handle incoming commands from the WebSocket command receiver
-                Some(command) = self.ws_command_receiver.recv() => {
-                    self.handle_command(command).await;
-                }
-
-                // Continuously read and forward WebSocket messages
-                result = self.read.as_mut().unwrap().next() => {
-                    match result {
-                        // Handle the case where the stream returns `Some(Result::Ok)`
-                        Some(Ok(Message::Text(text))) => {
-                            if let Err(err) = self.sender.send(text.to_string()).await {
-                                warn!("{}: Failed to forward message to OrderBookActor: {}", self.name, err);
-                            }
-                        }
-                        // Handle the case where the stream returns `Some(Result::Ok)` for other message types
-                        Some(Ok(other_message)) => {
-                            warn!("{}: Unhandled WebSocket message type: {:?}", self.name, other_message);
-                        }
-                        // Handle the case where the stream returns `Some(Result::Err)`
-                        Some(Err(err)) => {
-                            error!("{}: Error reading WS message: {}", self.name, err);
-                            break; // Exit the loop on WebSocket error
-                        }
-                        // Handle the case where the stream ends (`None`)
-                        None => {
-                            warn!("{}: WebSocket stream ended unexpectedly", self.name);
-                            break; // Exit the loop and reconnect
-                        }
-                    }
-                }
-            }
         }
     }
 }
