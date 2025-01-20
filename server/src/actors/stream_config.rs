@@ -1,6 +1,8 @@
 // StreamConfig is a mock config which will later be generated dynamically
 // by the future StreamManager
 use std::fmt;
+
+#[derive(Clone)]
 pub enum RequestedFeed {
     OrderBook,
 }
@@ -14,6 +16,7 @@ impl fmt::Display for RequestedFeed {
     }
 }
 
+#[derive(Clone)]
 pub struct StreamConfig {
     #[allow(dead_code)]
     pub exchange_symbol: &'static str,

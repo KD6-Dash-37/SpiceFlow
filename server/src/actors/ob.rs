@@ -1,3 +1,4 @@
+use super::router::ParsedMessage;
 use super::stream_config::StreamConfig;
 use super::ws::WebSocketCommand;
 use log;
@@ -89,6 +90,7 @@ impl fmt::Display for OrderBookUpdate {
     }
 }
 
+#[derive(Debug)]
 pub struct ProcessedOrderBookData {
     #[allow(dead_code)]
     pub topic: String,
@@ -133,12 +135,11 @@ pub struct OrderBookActor {
     name: String,
     #[allow(dead_code)]
     config: StreamConfig,
-    topic: String,
     tick_size: f64,
     bids: BTreeMap<OrderedF64, f64>,
     asks: BTreeMap<OrderedF64, f64>,
     change_id: Option<u64>,
-    receiver: mpsc::Receiver<String>,
+    parsed_data_receiver: mpsc::Receiver<ParsedMessage>,
     broadcast: mpsc::Sender<ProcessedOrderBookData>,
     ws_command_sender: mpsc::Sender<WebSocketCommand>,
 }
@@ -146,44 +147,46 @@ pub struct OrderBookActor {
 impl OrderBookActor {
     pub fn new(
         name: &str,
-        config: StreamConfig,
+        config: &StreamConfig,
+        parsed_data_receiver: mpsc::Receiver<ParsedMessage>,
         broadcast: mpsc::Sender<ProcessedOrderBookData>,
         ws_command_sender: mpsc::Sender<WebSocketCommand>,
-    ) -> (Self, mpsc::Sender<String>) {
-        let (ws_command_receiver, order_book_receiver) = mpsc::channel(1);
-        let topic = format!("{}.{}", config.internal_symbol, config.requested_feed);
-
-        (
-            Self {
-                name: name.to_string(),
-                config,
-                topic,
-                tick_size: 0.5,
-                bids: BTreeMap::new(),
-                asks: BTreeMap::new(),
-                change_id: None,
-                receiver: order_book_receiver,
-                broadcast,
-                ws_command_sender,
-            },
-            ws_command_receiver,
-        )
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            config: config.clone(),
+            tick_size: 0.5,
+            bids: BTreeMap::new(),
+            asks: BTreeMap::new(),
+            change_id: None,
+            parsed_data_receiver,
+            broadcast,
+            ws_command_sender,
+        }
     }
 
     // Process incoming messages
     pub async fn run(&mut self) {
-        while let Some(message) = self.receiver.recv().await {
-            if let Err(err) = async {
-                self.process_message(&message).await;
-                Ok::<(), OrderBookActorError>(())
+        while let Some(message) = self.parsed_data_receiver.recv().await {
+            match message {
+                ParsedMessage::OrderBook { topic, data } => {
+                    if let Err(err) = async {
+                        self.process_message(topic, data).await;
+                        Ok::<(), OrderBookActorError>(())
+                    }
+                    .await
+                    {
+                        log::error!("{}: Error in run loop: {:?}", self.name, err);
+                    }
+                }
+                _ => {
+                    log::warn!(
+                        "{}: Ignoring non-OrderBook message: {:?}",
+                        self.name,
+                        std::any::type_name::<ParsedMessage>()
+                    )
+                }
             }
-            .await
-            {
-                log::error!("{}: Error in run loop: {:?}", self.name, err);
-            }
-            // Uncomment below to print best bid/ask in console
-            // println!("best bid: {:?}", self.best_bid());
-            // println!("best ask: {:?}", self.best_ask());
         }
     }
 
@@ -204,63 +207,60 @@ impl OrderBookActor {
     }
 
     async fn normalise_price(&self, price: f64) -> OrderBookResult<OrderedF64> {
-        if price.is_nan() || price.is_infinite() || price <= 0.0 {
-            log::warn!("{}: Failed to normalise price {}", self.name, price);
+        if price.is_nan() {
+            log::warn!("{}: Price is NaN, cannot normalise", self.name);
             return Err(OrderBookActorError::ValidationError(
-                "Malformed price".to_string(),
+                "Price is NaN".to_string(),
+            ));
+        } else if price.is_infinite() {
+            log::warn!("{}: Price is infinite, cannot normalise", self.name);
+            return Err(OrderBookActorError::ValidationError(
+                "Price is infinite".to_string(),
+            ));
+        } else if price <= 0.0 {
+            log::warn!("{}: Price is non-positive ({})", self.name, price); // negative prices will exist in implied order books
+            return Err(OrderBookActorError::ValidationError(
+                "Price is not positive".to_string(),
             ));
         }
+
         let norm_price = (price / self.tick_size).round() * self.tick_size;
         Ok(OrderedF64(norm_price))
     }
 
-    fn parse_message(
-        &self,
-        message: &str,
-    ) -> OrderBookResult<(OrderBookMessageType, serde_json::Value)> {
-        // Parse the message as JSON
-        let parsed_message: serde_json::Value =
-            serde_json::from_str(message).map_err(OrderBookActorError::JsonParseError)?;
+    pub async fn process_message(&mut self, topic: String, data: serde_json::Value) {
+        let mut resubscribe_needed = false;
 
-        // Extract the message type
-        if let Some(msg_type) = parsed_message["params"]["data"]["type"].as_str() {
-            let message_type = match msg_type {
-                "snapshot" => OrderBookMessageType::Snapshot,
-                "change" => OrderBookMessageType::Change,
-                other => {
+        if let Err(err) = async {
+            // Determine the type of the parsed message
+            let message_type = match data["type"].as_str() {
+                Some("change") => OrderBookMessageType::Change,
+                Some("snapshot") => OrderBookMessageType::Snapshot,
+                Some(other) => {
+                    log::warn!("{}: Unknown message type: {}", self.name, other);
                     return Err(OrderBookActorError::ValidationError(format!(
                         "Unknown message type: {}",
                         other
                     )));
                 }
+                None => {
+                    log::error!("{}: Missing 'type' field in message", self.name);
+                    return Err(OrderBookActorError::MissingField(
+                        "Missing 'type' field in message".to_string(),
+                    ));
+                }
             };
-            Ok((message_type, parsed_message))
-        } else {
-            Err(OrderBookActorError::MissingField(
-                "Missing params.data.type field in message".to_string(),
-            ))
-        }
-    }
-
-    pub async fn process_message(&mut self, message: &str) {
-        let mut resubscribe_needed = false;
-
-        if let Err(err) = async {
-            // Parse the message
-            let (message_type, parsed_message) = self.parse_message(message)?;
 
             // Process based on message type
             match message_type {
-                OrderBookMessageType::Snapshot => {
-                    match self.process_snapshot(&parsed_message).await {
-                        ProcessMessageResult::Ok => {}
-                        ProcessMessageResult::ErrRequiresResub(_) => {
-                            resubscribe_needed = true;
-                        }
-                        ProcessMessageResult::ErrNoResub(err) => return Err(err),
+                OrderBookMessageType::Change => match self.process_update(&data).await {
+                    ProcessMessageResult::Ok => {}
+                    ProcessMessageResult::ErrRequiresResub(_) => {
+                        resubscribe_needed = true;
                     }
-                }
-                OrderBookMessageType::Change => match self.process_update(&parsed_message).await {
+                    ProcessMessageResult::ErrNoResub(err) => return Err(err),
+                },
+                OrderBookMessageType::Snapshot => match self.process_snapshot(&data).await {
                     ProcessMessageResult::Ok => {}
                     ProcessMessageResult::ErrRequiresResub(_) => {
                         resubscribe_needed = true;
@@ -269,15 +269,9 @@ impl OrderBookActor {
                 },
             }
 
-            // Send processed data to BroadCastActor
-            if let Err(err) = self.send_processed_data().await {
-                log::error!(
-                    "{}: Failed to send processed order book data to BroadcastActor: {:?}",
-                    self.name,
-                    err
-                );
-                return Err(err); // Propagate the error for logging
-            }
+            // Send processed data to BroadcastActor
+            self.send_processed_data(topic).await?;
+
             Ok::<(), OrderBookActorError>(())
         }
         .await
@@ -285,7 +279,7 @@ impl OrderBookActor {
             log::error!("{}: Error processing message: {:?}", self.name, err);
         }
 
-        // Send resubscribe command only once per message
+        // Send resubscribe command if necessary
         if resubscribe_needed {
             if let Err(send_err) = self.send_resubscribe_command().await {
                 log::error!(
@@ -297,23 +291,7 @@ impl OrderBookActor {
         }
     }
 
-    async fn process_snapshot(
-        &mut self,
-        parsed_message: &serde_json::Value,
-    ) -> ProcessMessageResult {
-        let data = match self.extract_params_data(parsed_message) {
-            Ok(data) => data,
-            Err(err) => {
-                log::error!(
-                    "{}: Failed to extract params.data: {:?}, triggering resubscribe",
-                    self.name,
-                    err
-                );
-                return ProcessMessageResult::ErrRequiresResub(err);
-            }
-        };
-
-        // Update the change ID
+    async fn process_snapshot(&mut self, data: &serde_json::Value) -> ProcessMessageResult {
         if let Err(err) = self.update_stored_change_id(data).await {
             log::error!(
                 "{}: Error extracting change_id: {:?}, triggering resubscribe",
@@ -388,10 +366,7 @@ impl OrderBookActor {
         ProcessMessageResult::Ok
     }
 
-    async fn check_prev_change_id(
-        &self,
-        data: &serde_json::Map<String, serde_json::Value>,
-    ) -> OrderBookResult<()> {
+    async fn check_prev_change_id(&self, data: &serde_json::Value) -> OrderBookResult<()> {
         if let Some(prev_change_id) = data.get("prev_change_id").and_then(|v| v.as_u64()) {
             if Some(prev_change_id) != self.change_id {
                 log::error!(
@@ -415,19 +390,7 @@ impl OrderBookActor {
         Ok(())
     }
 
-    async fn process_update(&mut self, parsed_message: &serde_json::Value) -> ProcessMessageResult {
-        let data = match self.extract_params_data(parsed_message) {
-            Ok(data) => data,
-            Err(err) => {
-                log::error!(
-                    "{}: Failed to extract params.data: {:?}, triggering resubscribe",
-                    self.name,
-                    err
-                );
-                return ProcessMessageResult::ErrRequiresResub(err);
-            }
-        };
-
+    async fn process_update(&mut self, data: &serde_json::Value) -> ProcessMessageResult {
         if let Err(err) = self.check_prev_change_id(data).await {
             log::error!(
                 "{}: Could not validate prev_change_id on update: {:?}",
@@ -507,15 +470,6 @@ impl OrderBookActor {
         ProcessMessageResult::Ok
     }
 
-    fn extract_params_data<'a>(
-        &self,
-        parsed_message: &'a serde_json::Value,
-    ) -> Result<&'a serde_json::Map<String, serde_json::Value>, OrderBookActorError> {
-        parsed_message["params"]["data"]
-            .as_object()
-            .ok_or_else(|| OrderBookActorError::MissingField("params.data".to_string()))
-    }
-
     async fn send_resubscribe_command(&self) -> Result<(), OrderBookActorError> {
         if let Err(err) = self
             .ws_command_sender
@@ -535,7 +489,7 @@ impl OrderBookActor {
 
     async fn update_stored_change_id(
         &mut self,
-        data: &serde_json::Map<String, serde_json::Value>,
+        data: &serde_json::Value,
     ) -> Result<(), OrderBookActorError> {
         let change_id = data
             .get("change_id")
@@ -548,7 +502,7 @@ impl OrderBookActor {
         Ok(())
     }
 
-    pub async fn send_processed_data(&self) -> Result<(), OrderBookActorError> {
+    pub async fn send_processed_data(&self, topic: String) -> Result<(), OrderBookActorError> {
         let bids: Vec<(OrderedF64, f64)> = self
             .bids
             .iter()
@@ -560,11 +514,7 @@ impl OrderBookActor {
             .map(|(&price, &size)| (price, size))
             .collect();
 
-        let processed_data = ProcessedOrderBookData {
-            topic: self.topic.clone(), // FIXME remove hardcoded string when ready
-            bids,
-            asks,
-        };
+        let processed_data = ProcessedOrderBookData { topic, bids, asks };
 
         // Send to the broadcast channel
         if let Err(err) = self.broadcast.send(processed_data).await {
@@ -587,22 +537,26 @@ impl OrderBookActor {
 mod tests {
     use super::*;
 
+    fn init_test_logger() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
+
     #[tokio::test]
     async fn test_normalise_price() {
-        let (mock_ws_command_sender, _) = mpsc::channel(10);
+        init_test_logger();
+        let (_, mock_parsed_data_receiver) = mpsc::channel(10); // Correctly pair sender and receiver
         let (mock_broadcast, _) = mpsc::channel(10);
+        let (mock_ws_command_sender, _) = mpsc::channel(10);
         let config = StreamConfig::current();
-        let topic = format!("{}.{}", config.internal_symbol, config.requested_feed);
 
         let order_book_actor = OrderBookActor {
             name: "TestOrderBookActor".to_string(),
             config,
-            topic,
             tick_size: 0.5,
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             change_id: None,
-            receiver: tokio::sync::mpsc::channel(1).1, // Mock the receiver
+            parsed_data_receiver: mock_parsed_data_receiver, // Use the receiver here
             broadcast: mock_broadcast,
             ws_command_sender: mock_ws_command_sender,
         };
@@ -666,64 +620,25 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_params_data() {
-        let (mock_ws_command_sender, _) = mpsc::channel(10);
-        let (mock_broadcast, _) = mpsc::channel(10);
-        let config = StreamConfig::current();
-        let topic = format!("{}.{}", config.internal_symbol, config.requested_feed);
-
-        let actor = OrderBookActor {
-            name: "TestOrderBookActor".to_string(),
-            config,
-            topic,
-            tick_size: 0.5,
-            bids: BTreeMap::new(),
-            asks: BTreeMap::new(),
-            change_id: None,
-            receiver: mpsc::channel(10).1,
-            broadcast: mock_broadcast,
-            ws_command_sender: mock_ws_command_sender,
-        };
-
-        // Valid params.data
-        let valid_message = serde_json::json!({
-            "params": {
-                "data": {
-                    "type": "snapshot",
-                    "change_id": 42
-                }
-            }
-        });
-        let data = actor.extract_params_data(&valid_message).unwrap();
-        assert_eq!(data["type"], "snapshot");
-        assert_eq!(data["change_id"], 42);
-
-        // Missing params.data
-        let invalid_message = serde_json::json!({
-            "params": {}
-        });
-        assert!(actor.extract_params_data(&invalid_message).is_err());
-    }
-
-    #[test]
     fn test_best_bid_and_ask() {
-        let (mock_ws_command_sender, _) = mpsc::channel(10);
+        init_test_logger();
+        let (_, mock_parsed_data_receiver) = mpsc::channel(10); // Correct pairing
         let (mock_broadcast, _) = mpsc::channel(10);
+        let (mock_ws_command_sender, _) = mpsc::channel(10);
         let config = StreamConfig::current();
-        let topic = format!("{}.{}", config.internal_symbol, config.requested_feed);
 
         let mut actor = OrderBookActor {
             name: "TestOrderBookActor".to_string(),
             config,
-            topic,
             tick_size: 0.5,
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             change_id: None,
-            receiver: mpsc::channel(10).1,
+            parsed_data_receiver: mock_parsed_data_receiver, // Use the receiver here
             broadcast: mock_broadcast,
             ws_command_sender: mock_ws_command_sender,
         };
+
         // Empty order book
         assert_eq!(actor.best_bid(), None);
         assert_eq!(actor.best_ask(), None);
@@ -737,28 +652,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_processed_data() {
+        init_test_logger();
         let (data_sender, mut data_receiver) = mpsc::channel(10);
+        let (_, mock_parsed_data_receiver) = mpsc::channel(10); // Mock ParsedMessage channel
         let config = StreamConfig::current();
 
         let mut actor = OrderBookActor::new(
             "TestOrderBookActor",
-            config,
+            &config,
+            mock_parsed_data_receiver, // Provide the mock receiver
             data_sender,
             mpsc::channel(10).0,
-        )
-        .0;
+        );
 
         // Populate the order book
         actor.bids.insert(OrderedF64(30000.0), 1.0);
         actor.asks.insert(OrderedF64(30001.0), 1.5);
 
         // Send processed data
-        actor.send_processed_data().await.unwrap();
-        let config = StreamConfig::current();
         let topic = format!("{}.{}", config.internal_symbol, config.requested_feed);
+        actor.send_processed_data(topic.clone()).await.unwrap();
+
         // Verify the data sent to the channel
         if let Some(processed_data) = data_receiver.recv().await {
-            assert_eq!(processed_data.topic, topic); // FIXME remove hard coded instrument name
+            log::info!("Processed data received: {:?}", processed_data); // Log the processed data
+            assert_eq!(processed_data.topic, topic); // Ensure topic matches
             assert_eq!(processed_data.bids, vec![(OrderedF64(30000.0), 1.0)]);
             assert_eq!(processed_data.asks, vec![(OrderedF64(30001.0), 1.5)]);
         } else {
@@ -768,21 +686,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_processed_data_empty_order_book() {
+        init_test_logger();
         let (data_sender, mut data_receiver) = mpsc::channel(10);
         let config = StreamConfig::current();
 
         let actor = OrderBookActor::new(
             "TestOrderBookActor",
-            config,
+            &config,
+            mpsc::channel(10).1,
             data_sender,
             mpsc::channel(10).0,
-        )
-        .0;
+        );
 
         // Send processed data with an empty order book
-        actor.send_processed_data().await.unwrap();
+        let topic = format!("{}.{}", config.internal_symbol, config.requested_feed);
+        actor.send_processed_data(topic).await.unwrap();
 
-        let config = StreamConfig::current();
         let topic = format!("{}.{}", config.internal_symbol, config.requested_feed);
 
         // Verify the data sent to the channel
@@ -794,27 +713,61 @@ mod tests {
             panic!("No data received in the broadcast channel");
         }
     }
+
     #[tokio::test]
     async fn test_send_processed_data_channel_closed() {
+        init_test_logger();
         let (data_sender, _) = mpsc::channel(10); // Drop the receiver to simulate channel closure
         let config = StreamConfig::current();
 
         let mut actor = OrderBookActor::new(
             "TestOrderBookActor",
-            config,
+            &config,
+            mpsc::channel(10).1,
             data_sender,
             mpsc::channel(10).0,
-        )
-        .0;
+        );
 
         // Populate the order book
         actor.bids.insert(OrderedF64(30000.0), 1.0);
         actor.asks.insert(OrderedF64(30001.0), 1.5);
 
         // Attempt to send processed data
-        let result = actor.send_processed_data().await;
+        let topic = format!("{}.{}", config.internal_symbol, config.requested_feed);
+        let result = actor.send_processed_data(topic).await;
 
         // Verify that an error is returned
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_empty_parsed_message() {
+        init_test_logger();
+        let (_, mock_parsed_data_receiver) = mpsc::channel(10);
+        let (mock_broadcast, _) = mpsc::channel(10);
+        let (mock_ws_command_sender, _) = mpsc::channel(10);
+        let config = StreamConfig::current();
+
+        let mut actor = OrderBookActor::new(
+            "TestOrderBookActor",
+            &config,
+            mock_parsed_data_receiver,
+            mock_broadcast,
+            mock_ws_command_sender,
+        );
+
+        // Simulate an empty ParsedMessage
+        let message = ParsedMessage::OrderBook {
+            topic: String::new(),
+            data: serde_json::Value::Null,
+        };
+
+        if let ParsedMessage::OrderBook { topic, data } = message {
+            actor.process_message(topic, data).await;
+        }
+
+        // Assert no changes to the order book
+        assert_eq!(actor.bids.len(), 0);
+        assert_eq!(actor.asks.len(), 0);
     }
 }
