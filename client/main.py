@@ -1,17 +1,33 @@
 import zmq
 
+# import sys
+# from pathlib import Path
+
+# sys.path.append(str(Path(__file__).parent))
+
+from spiceflow_client.order_book import deserialise_and_print
+
+
 def main():
+    
     context = zmq.Context()
     socket = context.socket(zmq.SUB)
     socket.connect("tcp://localhost:5555")
+    # Subscribe to all topics
     socket.setsockopt_string(zmq.SUBSCRIBE, "")
+    
     print("Listening for messages...")
+    
     while True:
         try:
-            topic = socket.recv_string()
-            message = socket.recv()
-            print(f"Topic: {topic}")
-            print(f"Message (raw bytes): {message}")
+            
+            # Receive the message in raw bytes
+            print(socket.recv_string())
+            buf: bytearray = socket.recv()
+            deserialise_and_print(buf)
+
+            
+        
         except KeyboardInterrupt:
             print("Shutting down client.")
             break

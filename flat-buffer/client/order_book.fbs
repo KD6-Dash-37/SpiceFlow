@@ -1,0 +1,16 @@
+// This template should be exactly the same as the order_book.fbs
+// except for the namespace which generates the import path in the file
+namespace spiceflow_client.gen_templates;
+
+table PriceLevel {
+    price: double;
+    size: double;
+}
+
+table OrderBook {
+    topic: string;
+    bids: [PriceLevel];
+    asks: [PriceLevel];
+}
+
+root_type OrderBook;

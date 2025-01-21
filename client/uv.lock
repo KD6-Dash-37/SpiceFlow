@@ -28,11 +28,24 @@ name = "client"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "flatbuffers" },
     { name = "zmq" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "zmq", specifier = ">=0.0.0" }]
+requires-dist = [
+    { name = "flatbuffers", specifier = ">=24.12.23" },
+    { name = "zmq", specifier = ">=0.0.0" },
+]
+
+[[package]]
+name = "flatbuffers"
+version = "24.12.23"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a3/83/9ae01534f7e92a0c04f86586a0d62a4a0266e51d8bb2bfd5b8ea8165abba/flatbuffers-24.12.23.tar.gz", hash = "sha256:2910b0bc6ae9b6db78dd2b18d0b7a0709ba240fb5585f286a3a2b30785c22dac", size = 22164 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fb/b4/31c461eef98b96b8ab736d97274548eaf2b2e349bf09e4de3902f7d53084/flatbuffers-24.12.23-py2.py3-none-any.whl", hash = "sha256:c418e0d48890f4142b92fd3e343e73a48f194e1f80075ddcc5793779b3585444", size = 30962 },
+]
 
 [[package]]
 name = "pycparser"
