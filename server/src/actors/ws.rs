@@ -1,7 +1,7 @@
 use super::stream_config::StreamConfig;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use log::{error, info, warn};
+use log;
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -85,21 +85,34 @@ impl WebSocketActor {
                         // Handle the case where the stream returns `Some(Result::Ok)`
                         Some(Ok(Message::Text(text))) => {
                             if let Err(err) = self.router.send(text.to_string()).await {
-                                warn!("{}: Failed to forward message to OrderBookActor: {}", self.name, err);
+                                log::warn!("{}: Failed to forward message to OrderBookActor: {}", self.name, err);
                             }
+                        }
+                        // Handle Websocket Pings
+                        Some(Ok(Message::Ping(ping_data))) => {
+                            log::info!("{}: Ping", self.name);
+                            if let Some(write) = &mut self.write {
+                                if let Err(err) = write.send(Message::Pong(ping_data)).await {
+                                    log::warn!("{}: Failed to response to Ping: {}", self.name, err);
+                                }
+                            }
+                        }
+                        // Handle Websocket Pongs
+                        Some(Ok(Message::Pong(_))) => {
+                            log::info!("{}: Received Pong", self.name);
                         }
                         // Handle the case where the stream returns `Some(Result::Ok)` for other message types
                         Some(Ok(other_message)) => {
-                            warn!("{}: Unhandled WebSocket message type: {:?}", self.name, other_message);
+                            log::warn!("{}: Unhandled WebSocket message type: {:?}", self.name, other_message);
                         }
                         // Handle the case where the stream returns `Some(Result::Err)`
                         Some(Err(err)) => {
-                            error!("{}: Error reading WS message: {}", self.name, err);
+                            log::error!("{}: Error reading WS message: {}", self.name, err);
                             break; // Exit the loop on WebSocket error
                         }
                         // Handle the case where the stream ends (`None`)
                         None => {
-                            warn!("{}: WebSocket stream ended unexpectedly", self.name);
+                            log::warn!("{}: WebSocket stream ended unexpectedly", self.name);
                             break; // Exit the loop and reconnect
                         }
                     }
@@ -110,19 +123,19 @@ impl WebSocketActor {
 
     async fn create_ws_stream(&mut self) {
         let url = "wss://www.deribit.com/ws/api/v2"; // TODO extract the hardcoded URL, config perhaps?
-        info!(
+        log::info!(
             "{}: Attempting to create WebSocket stream to {}",
             self.name, url
         );
         match connect_with_retry(url, None, 10).await {
             Ok(ws_stream) => {
-                info!("{}: WS connection established to {}", self.name, url);
+                log::info!("{}: WS connection established to {}", self.name, url);
                 let (_write, _read) = ws_stream.split();
                 self.write = Some(_write);
                 self.read = Some(_read)
             }
             Err(err) => {
-                error!("{}: Failed to create WebSocket stream: {}", self.name, err);
+                log::error!("{}: Failed to create WebSocket stream: {}", self.name, err);
                 panic!(
                     "{}: Critical failure - unable to establish WebSocket connection",
                     self.name
@@ -134,7 +147,7 @@ impl WebSocketActor {
     async fn handle_command(&mut self, command: WebSocketCommand) {
         match command {
             WebSocketCommand::Resubscribe => {
-                info!("{}: Resubscribing to order book", self.name);
+                log::info!("{}: Resubscribing to order book", self.name);
                 self.unsubscribe().await;
                 self.subscribe().await;
             }
@@ -143,7 +156,7 @@ impl WebSocketActor {
 
     async fn subscribe(&mut self) {
         let config = StreamConfig::current();
-        info!("{}: Subscribing to {}", self.name, config.internal_symbol);
+        log::info!("{}: Subscribing to {}", self.name, config.internal_symbol);
         if let Some(write) = &mut self.write {
             // Prepare subscription message
             let subscription_message = SubscriptionMessage {
@@ -158,7 +171,7 @@ impl WebSocketActor {
             let message_text = match serde_json::to_string(&subscription_message) {
                 Ok(json) => json,
                 Err(err) => {
-                    error!(
+                    log::error!(
                         "{}: Failed to serialise subscription message: {}",
                         self.name, err
                     );
@@ -171,14 +184,14 @@ impl WebSocketActor {
                 .send(Message::Text(message_text.to_string().into()))
                 .await
             {
-                error!(
+                log::error!(
                     "{}: Failed to send subscription message: {}",
                     self.name, err
                 );
                 return;
             }
 
-            info!(
+            log::info!(
                 "{}: Subscription message sent, await response...",
                 self.name
             );
@@ -187,40 +200,40 @@ impl WebSocketActor {
             if let Some(read) = &mut self.read {
                 match read.next().await {
                     Some(Ok(Message::Text(response))) => {
-                        info!(
+                        log::info!(
                             "{}: Received subscription response: {}",
                             self.name, response
                         );
                     }
                     Some(Ok(other_message)) => {
-                        warn!(
+                        log::warn!(
                             "{} Unexpected WS message during subscription: {:?}",
                             self.name, other_message
                         );
                     }
                     Some(Err(err)) => {
-                        error!(
+                        log::error!(
                             "{}: Error reading WS response during subscription: {}",
                             self.name, err
                         );
                     }
                     None => {
-                        warn!(
+                        log::warn!(
                             "{}: WS stream ended unexpectedly during subscription",
                             self.name
                         );
                     }
                 }
             } else {
-                error!("{}: Read stream is not initialised!", self.name)
+                log::error!("{}: Read stream is not initialised!", self.name)
             }
         } else {
-            error!("{}: Write stream is not initialised!", self.name)
+            log::error!("{}: Write stream is not initialised!", self.name)
         }
     }
 
     async fn unsubscribe(&mut self) {
-        info!("{}: Unsubscribing", self.name);
+        log::info!("{}: Unsubscribing", self.name);
         let config = StreamConfig::current();
         if let Some(write) = &mut self.write {
             // Prepare unsubscribe message
@@ -236,7 +249,7 @@ impl WebSocketActor {
             let message_text = match serde_json::to_string(&unsubscribe_message) {
                 Ok(json) => json,
                 Err(err) => {
-                    error!(
+                    log::error!(
                         "{}: Failed to serialise unsubscribe message: {}",
                         self.name, err
                     );
@@ -248,41 +261,41 @@ impl WebSocketActor {
                 .send(Message::Text(message_text.to_string().into()))
                 .await
             {
-                error!("{}: Failed to send unsubscribe message: {}", self.name, err);
+                log::error!("{}: Failed to send unsubscribe message: {}", self.name, err);
                 return;
             }
 
-            info!("{}: Unsubscribe message sent, await response...", self.name);
+            log::info!("{}: Unsubscribe message sent, await response...", self.name);
 
             if let Some(read) = &mut self.read {
                 match read.next().await {
                     Some(Ok(Message::Text(response))) => {
-                        info!("{}: Received unsubscribe response: {}", self.name, response);
+                        log::info!("{}: Received unsubscribe response: {}", self.name, response);
                     }
                     Some(Ok(other_message)) => {
-                        warn!(
+                        log::warn!(
                             "{} Unexpected WS message during unsubscribe: {:?}",
                             self.name, other_message
                         );
                     }
                     Some(Err(err)) => {
-                        error!(
+                        log::error!(
                             "{}: Error reading WS response during unsubscribe: {}",
                             self.name, err
                         );
                     }
                     None => {
-                        warn!(
+                        log::warn!(
                             "{}: WS stream ended unexpectedly during unsubscribe",
                             self.name
                         );
                     }
                 }
             } else {
-                error!("{}: Read stream is not initialised!", self.name)
+                log::error!("{}: Read stream is not initialised!", self.name)
             }
         } else {
-            error!("{}: Write stream is not initialised", self.name);
+            log::error!("{}: Write stream is not initialised", self.name);
         }
     }
 }
