@@ -16,17 +16,17 @@ async fn main() {
     dotenv().ok();
 
     // Initialise the logger
-    env_logger::Builder::from_default_env()
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format(|buf, record| {
             use std::io::Write;
             writeln!(
                 buf,
                 "{} [{}:{}] {} - {}",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), // Timestamp
-                record.file().unwrap_or("unknown"),               // File name
-                record.line().unwrap_or(0),                       // Line number
-                record.level(),                                   // Log level
-                record.args()                                     // Log message
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.file().unwrap_or("unknown"),
+                record.line().unwrap_or(0),
+                record.level(),
+                record.args()
             )
         })
         .init();

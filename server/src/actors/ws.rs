@@ -1,7 +1,9 @@
 use super::stream_config::StreamConfig;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
-use log::{error, info, warn};
+use log;
+use once_cell::sync::Lazy;
+use serde;
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -15,32 +17,63 @@ type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 #[derive(Debug)]
 pub enum WebSocketCommand {
     Resubscribe,
-    // Stop, For potential future use, e.g. gracefully stopping the WebSocketActor
+    // Stop,
+}
+
+#[derive(Debug)]
+pub enum SubscriptionManagementAction {
+    Subscribe,
+    Unsubscribe,
+    Test,
+}
+
+impl SubscriptionManagementAction {
+    fn as_str(&self) -> &'static str {
+        match self {
+            SubscriptionManagementAction::Subscribe => "public/subscribe",
+            SubscriptionManagementAction::Unsubscribe => "public/unsubscribe",
+            SubscriptionManagementAction::Test => "public/test",
+        }
+    }
+    fn as_id(&self) -> u64 {
+        match self {
+            SubscriptionManagementAction::Subscribe => 1,
+            SubscriptionManagementAction::Unsubscribe => 2,
+            SubscriptionManagementAction::Test => 9999,
+        }
+    }
+    pub fn from_id(id: u64) -> Option<Self> {
+        match id {
+            1 => Some(SubscriptionManagementAction::Subscribe),
+            2 => Some(SubscriptionManagementAction::Unsubscribe),
+            9999 => Some(SubscriptionManagementAction::Test),
+            _ => None,
+        }
+    }
 }
 
 const DEFAULT_JSONRPC: &str = "2.0";
 
+static STAY_ALIVE_MESSAGE: Lazy<Message> = Lazy::new(|| {
+    let json = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 9999,
+        "method": "public/test",
+        "params": {}
+    });
+    Message::Text(json.to_string().into())
+});
+
 #[derive(Serialize)]
-struct SubscriptionMessage<'a> {
+struct SubscriptionRequest<'a> {
     jsonrpc: &'a str,
+    id: Option<u64>,
     method: &'a str,
-    params: SubscriptionParams<'a>,
+    params: SubscriptionRequestParams<'a>,
 }
 
 #[derive(Serialize)]
-struct SubscriptionParams<'a> {
-    channels: &'a Vec<String>,
-}
-
-#[derive(Serialize)]
-struct UnsubscriptionMessage<'a> {
-    jsonrpc: &'a str,
-    method: &'a str,
-    params: UnsubscriptionParams<'a>,
-}
-
-#[derive(Serialize)]
-struct UnsubscriptionParams<'a> {
+struct SubscriptionRequestParams<'a> {
     channels: &'a Vec<String>,
 }
 
@@ -72,6 +105,9 @@ impl WebSocketActor {
         self.create_ws_stream().await;
         self.subscribe().await;
 
+        // Create an interval for the stay-alive mechanism
+        let mut stay_alive_interval = tokio::time::interval(Duration::from_secs(30));
+
         loop {
             tokio::select! {
                 // Handle incoming commands from the WebSocket command receiver
@@ -85,24 +121,29 @@ impl WebSocketActor {
                         // Handle the case where the stream returns `Some(Result::Ok)`
                         Some(Ok(Message::Text(text))) => {
                             if let Err(err) = self.router.send(text.to_string()).await {
-                                warn!("{}: Failed to forward message to OrderBookActor: {}", self.name, err);
+                                log::warn!("{}: Failed to forward message to OrderBookActor: {}", self.name, err);
                             }
                         }
                         // Handle the case where the stream returns `Some(Result::Ok)` for other message types
                         Some(Ok(other_message)) => {
-                            warn!("{}: Unhandled WebSocket message type: {:?}", self.name, other_message);
+                            log::warn!("{}: Unhandled WebSocket message type: {:?}", self.name, other_message);
                         }
                         // Handle the case where the stream returns `Some(Result::Err)`
                         Some(Err(err)) => {
-                            error!("{}: Error reading WS message: {}", self.name, err);
+                            log::error!("{}: Error reading WS message: {}", self.name, err);
                             break; // Exit the loop on WebSocket error
                         }
                         // Handle the case where the stream ends (`None`)
                         None => {
-                            warn!("{}: WebSocket stream ended unexpectedly", self.name);
+                            log::warn!("{}: WebSocket stream ended unexpectedly", self.name);
                             break; // Exit the loop and reconnect
                         }
                     }
+                }
+
+                // Send periodic stay-alive message
+                _ = stay_alive_interval.tick() => {
+                    self.stay_alive().await;
                 }
             }
         }
@@ -110,19 +151,20 @@ impl WebSocketActor {
 
     async fn create_ws_stream(&mut self) {
         let url = "wss://www.deribit.com/ws/api/v2"; // TODO extract the hardcoded URL, config perhaps?
-        info!(
+        log::info!(
             "{}: Attempting to create WebSocket stream to {}",
-            self.name, url
+            self.name,
+            url
         );
         match connect_with_retry(url, None, 10).await {
             Ok(ws_stream) => {
-                info!("{}: WS connection established to {}", self.name, url);
+                log::info!("{}: WS connection established to {}", self.name, url);
                 let (_write, _read) = ws_stream.split();
                 self.write = Some(_write);
                 self.read = Some(_read)
             }
             Err(err) => {
-                error!("{}: Failed to create WebSocket stream: {}", self.name, err);
+                log::error!("{}: Failed to create WebSocket stream: {}", self.name, err);
                 panic!(
                     "{}: Critical failure - unable to establish WebSocket connection",
                     self.name
@@ -134,7 +176,7 @@ impl WebSocketActor {
     async fn handle_command(&mut self, command: WebSocketCommand) {
         match command {
             WebSocketCommand::Resubscribe => {
-                info!("{}: Resubscribing to order book", self.name);
+                log::info!("{}: Resubscribing to order book", self.name);
                 self.unsubscribe().await;
                 self.subscribe().await;
             }
@@ -143,146 +185,100 @@ impl WebSocketActor {
 
     async fn subscribe(&mut self) {
         let config = StreamConfig::current();
-        info!("{}: Subscribing to {}", self.name, config.internal_symbol);
-        if let Some(write) = &mut self.write {
-            // Prepare subscription message
-            let subscription_message = SubscriptionMessage {
-                jsonrpc: DEFAULT_JSONRPC,
-                method: "public/subscribe",
-                params: SubscriptionParams {
-                    channels: &config.channels,
-                },
-            };
+        log::info!("{}: Subscribing to {}", self.name, config.internal_symbol);
 
-            // Serialise subscription message
-            let message_text = match serde_json::to_string(&subscription_message) {
-                Ok(json) => json,
-                Err(err) => {
-                    error!(
-                        "{}: Failed to serialise subscription message: {}",
-                        self.name, err
+        // Check if write is initialised
+        if self.write.is_none() {
+            log::error!("{}: Write stream is not initialised", self.name);
+            return;
+        }
+
+        if let Some(write) = &mut self.write {
+            if let Some(message) = WebSocketActor::prepare_subscription_management_message(
+                SubscriptionManagementAction::Subscribe,
+                &config.channels,
+            ) {
+                if let Err(err) = write.send(Message::Text(message.into())).await {
+                    log::error!(
+                        "{}: Failed to send subscription message: {}",
+                        self.name,
+                        err
                     );
                     return;
                 }
-            };
 
-            // Send subscription Message
-            if let Err(err) = write
-                .send(Message::Text(message_text.to_string().into()))
-                .await
-            {
-                error!(
-                    "{}: Failed to send subscription message: {}",
-                    self.name, err
+                log::info!(
+                    "{}: Subscription message sent for channels: {:?}",
+                    self.name,
+                    config.channels
                 );
-                return;
-            }
-
-            info!(
-                "{}: Subscription message sent, await response...",
-                self.name
-            );
-
-            // Await a response from the WS server
-            if let Some(read) = &mut self.read {
-                match read.next().await {
-                    Some(Ok(Message::Text(response))) => {
-                        info!(
-                            "{}: Received subscription response: {}",
-                            self.name, response
-                        );
-                    }
-                    Some(Ok(other_message)) => {
-                        warn!(
-                            "{} Unexpected WS message during subscription: {:?}",
-                            self.name, other_message
-                        );
-                    }
-                    Some(Err(err)) => {
-                        error!(
-                            "{}: Error reading WS response during subscription: {}",
-                            self.name, err
-                        );
-                    }
-                    None => {
-                        warn!(
-                            "{}: WS stream ended unexpectedly during subscription",
-                            self.name
-                        );
-                    }
-                }
             } else {
-                error!("{}: Read stream is not initialised!", self.name)
+                log::error!("{}: Failed to prepare subscription message", self.name);
             }
-        } else {
-            error!("{}: Write stream is not initialised!", self.name)
         }
     }
 
     async fn unsubscribe(&mut self) {
-        info!("{}: Unsubscribing", self.name);
         let config = StreamConfig::current();
-        if let Some(write) = &mut self.write {
-            // Prepare unsubscribe message
-            let unsubscribe_message = UnsubscriptionMessage {
-                jsonrpc: DEFAULT_JSONRPC,
-                method: "public/unsubscribe",
-                params: UnsubscriptionParams {
-                    channels: &config.channels,
-                },
-            };
+        log::info!("{}: Unsubscribing to {}", self.name, config.internal_symbol);
 
-            // Serialise unsubscribe message
-            let message_text = match serde_json::to_string(&unsubscribe_message) {
-                Ok(json) => json,
-                Err(err) => {
-                    error!(
-                        "{}: Failed to serialise unsubscribe message: {}",
-                        self.name, err
-                    );
+        // Check if write is initialised
+        if self.write.is_none() {
+            log::error!("{}: Write stream is not initialised", self.name);
+            return;
+        }
+
+        if let Some(write) = &mut self.write {
+            if let Some(message) = WebSocketActor::prepare_subscription_management_message(
+                SubscriptionManagementAction::Unsubscribe,
+                &config.channels,
+            ) {
+                if let Err(err) = write.send(Message::Text(message.into())).await {
+                    log::error!("{}: Failed to send unsubscripe message: {}", self.name, err);
                     return;
                 }
-            };
 
-            if let Err(err) = write
-                .send(Message::Text(message_text.to_string().into()))
-                .await
-            {
-                error!("{}: Failed to send unsubscribe message: {}", self.name, err);
-                return;
-            }
-
-            info!("{}: Unsubscribe message sent, await response...", self.name);
-
-            if let Some(read) = &mut self.read {
-                match read.next().await {
-                    Some(Ok(Message::Text(response))) => {
-                        info!("{}: Received unsubscribe response: {}", self.name, response);
-                    }
-                    Some(Ok(other_message)) => {
-                        warn!(
-                            "{} Unexpected WS message during unsubscribe: {:?}",
-                            self.name, other_message
-                        );
-                    }
-                    Some(Err(err)) => {
-                        error!(
-                            "{}: Error reading WS response during unsubscribe: {}",
-                            self.name, err
-                        );
-                    }
-                    None => {
-                        warn!(
-                            "{}: WS stream ended unexpectedly during unsubscribe",
-                            self.name
-                        );
-                    }
-                }
+                log::info!(
+                    "{}: Unsubscribe message sent for channels: {:?}",
+                    self.name,
+                    config.channels
+                );
             } else {
-                error!("{}: Read stream is not initialised!", self.name)
+                log::error!("{}: Failed to prepare unsubscribe message", self.name);
+            }
+        }
+    }
+
+    fn prepare_subscription_management_message(
+        action: SubscriptionManagementAction,
+        channels: &Vec<String>,
+    ) -> Option<String> {
+        let message = SubscriptionRequest {
+            jsonrpc: DEFAULT_JSONRPC,
+            id: Some(action.as_id()),
+            method: action.as_str(),
+            params: SubscriptionRequestParams { channels },
+        };
+        serde_json::to_string(&message).ok()
+    }
+
+    async fn stay_alive(&mut self) {
+        if let Some(write) = &mut self.write {
+            // Send pre-defined stay-alive message
+            if let Err(err) = write.send(STAY_ALIVE_MESSAGE.clone()).await {
+                log::warn!(
+                    "{}: Failed to send stay-alive test message: {}",
+                    self.name,
+                    err
+                );
+            } else {
+                log::debug!("{}: Stay-alive message sent", self.name);
             }
         } else {
-            error!("{}: Write stream is not initialised", self.name);
+            log::error!(
+                "{}: Cannot send stay-alive test mesage, write stream is not initialised",
+                self.name
+            )
         }
     }
 }
