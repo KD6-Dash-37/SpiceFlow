@@ -503,11 +503,13 @@ impl OrderBookActor {
     }
 
     pub async fn send_processed_data(&self, topic: String) -> Result<(), OrderBookActorError> {
-        let bids: Vec<(OrderedF64, f64)> = self
+        let mut bids: Vec<(OrderedF64, f64)> = self
             .bids
             .iter()
             .map(|(&price, &size)| (price, size))
             .collect();
+        bids.sort_by(|a, b| b.0.cmp(&a.0));
+
         let asks: Vec<(OrderedF64, f64)> = self
             .asks
             .iter()
@@ -769,5 +771,60 @@ mod tests {
         // Assert no changes to the order book
         assert_eq!(actor.bids.len(), 0);
         assert_eq!(actor.asks.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_send_processed_data_sorted() {
+        let (data_sender, mut data_receiver) = mpsc::channel(10);
+        let (_, mock_parsed_data_receiver) = mpsc::channel(10); // Mock ParsedMessage channel
+        let config = StreamConfig::current();
+
+        let mut actor = OrderBookActor::new(
+            "TestOrderBookActor",
+            &config,
+            mock_parsed_data_receiver,
+            data_sender,
+            mpsc::channel(10).0,
+        );
+
+        // Populate the order book
+        actor.bids.insert(OrderedF64(101.0), 5.0);
+        actor.bids.insert(OrderedF64(102.0), 3.0);
+        actor.bids.insert(OrderedF64(100.0), 2.0);
+
+        actor.asks.insert(OrderedF64(103.0), 2.0);
+        actor.asks.insert(OrderedF64(104.0), 1.0);
+        actor.asks.insert(OrderedF64(102.0), 4.0);
+
+        // Send processed data
+        let topic = format!("{}.{}", config.internal_symbol, config.requested_feed);
+        actor.send_processed_data(topic.clone()).await.unwrap();
+
+        // Verify the data sent to the channel
+        if let Some(processed_data) = data_receiver.recv().await {
+            assert_eq!(processed_data.topic, topic);
+
+            // Ensure bids are sorted in descending order
+            assert_eq!(
+                processed_data.bids,
+                vec![
+                    (OrderedF64(102.0), 3.0),
+                    (OrderedF64(101.0), 5.0),
+                    (OrderedF64(100.0), 2.0)
+                ]
+            );
+
+            // Ensure asks are sorted in ascending order
+            assert_eq!(
+                processed_data.asks,
+                vec![
+                    (OrderedF64(102.0), 4.0),
+                    (OrderedF64(103.0), 2.0),
+                    (OrderedF64(104.0), 1.0)
+                ]
+            );
+        } else {
+            panic!("No data received in the broadcast channel");
+        }
     }
 }
