@@ -17,20 +17,19 @@ async fn main() {
 
     // Initialise the logger
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-    .format(|buf, record| {
-        use std::io::Write;
-        writeln!(
-            buf,
-            "{} [{}:{}] {} - {}",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-            record.file().unwrap_or("unknown"),
-            record.line().unwrap_or(0),
-            record.level(),
-            record.args()
-        )
-    })
-    .init();
-
+        .format(|buf, record| {
+            use std::io::Write;
+            writeln!(
+                buf,
+                "{} [{}:{}] {} - {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.file().unwrap_or("unknown"),
+                record.line().unwrap_or(0),
+                record.level(),
+                record.args()
+            )
+        })
+        .init();
 
     // https://github.com/snapview/tokio-tungstenite/issues/353
     rustls::crypto::aws_lc_rs::default_provider()
