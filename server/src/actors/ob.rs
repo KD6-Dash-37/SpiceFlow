@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use thiserror::Error;
 use tokio::sync::mpsc;
+use serde::Deserialize;
 
 #[derive(Debug, Error)]
 pub enum OrderBookActorError {
@@ -28,9 +29,7 @@ type OrderBookResult<T> = Result<T, OrderBookActorError>;
 
 pub enum ProcessMessageResult {
     Ok,
-    #[allow(dead_code)]
     ErrRequiresResub(OrderBookActorError),
-    #[allow(dead_code)]
     ErrNoResub(OrderBookActorError),
 }
 
@@ -47,12 +46,7 @@ enum OrderBookSide {
 }
 
 impl OrderBookSide {
-    fn as_str(&self) -> &'static str {
-        match self {
-            OrderBookSide::Bids => "bids",
-            OrderBookSide::Asks => "asks",
-        }
-    }
+
     fn get_map<'a>(&self, actor: &'a mut OrderBookActor) -> &'a mut BTreeMap<OrderedF64, f64> {
         match self {
             OrderBookSide::Bids => &mut actor.bids,
@@ -92,12 +86,10 @@ impl fmt::Display for OrderBookUpdate {
 
 #[derive(Debug)]
 pub struct ProcessedOrderBookData {
-    #[allow(dead_code)]
     pub topic: String,
-    #[allow(dead_code)]
     pub bids: Vec<(OrderedF64, f64)>,
-    #[allow(dead_code)]
     pub asks: Vec<(OrderedF64, f64)>,
+    pub exch_timestamp: u64
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -131,6 +123,20 @@ impl Ord for OrderedF64 {
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RawOrderBookData {
+    pub r#type: String,
+    pub timestamp: u64,
+    pub instrument_name: String,
+    pub change_id: u64,
+    pub prev_change_id: Option<u64>,
+    pub bids: Vec<RawOrderBookEntry>,
+    pub asks: Vec<RawOrderBookEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RawOrderBookEntry(pub String, pub f64, pub f64);
+
 pub struct OrderBookActor {
     name: String,
     #[allow(dead_code)]
@@ -139,6 +145,7 @@ pub struct OrderBookActor {
     bids: BTreeMap<OrderedF64, f64>,
     asks: BTreeMap<OrderedF64, f64>,
     change_id: Option<u64>,
+    exch_timestamp: Option<u64>,
     parsed_data_receiver: mpsc::Receiver<ParsedMessage>,
     broadcast: mpsc::Sender<ProcessedOrderBookData>,
     ws_command_sender: mpsc::Sender<WebSocketCommand>,
@@ -159,6 +166,7 @@ impl OrderBookActor {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             change_id: None,
+            exch_timestamp: None,
             parsed_data_receiver,
             broadcast,
             ws_command_sender,
@@ -232,42 +240,43 @@ impl OrderBookActor {
         let mut resubscribe_needed = false;
 
         if let Err(err) = async {
-            // Determine the type of the parsed message
-            let message_type = match data["type"].as_str() {
-                Some("change") => OrderBookMessageType::Change,
-                Some("snapshot") => OrderBookMessageType::Snapshot,
-                Some(other) => {
+            // Deserialize the JSON data into the structured format
+            let raw_order_book_data: RawOrderBookData = serde_json::from_value(data).map_err(|e| {
+                log::error!("{}: Failed to deserialize OrderBookData: {}", self.name, e);
+                OrderBookActorError::JsonParseError(e)
+            })?;
+
+            // Determine the message type
+            let message_type = match raw_order_book_data.r#type.as_str() {
+                "change" => OrderBookMessageType::Change,
+                "snapshot" => OrderBookMessageType::Snapshot,
+                other => {
                     log::warn!("{}: Unknown message type: {}", self.name, other);
                     return Err(OrderBookActorError::ValidationError(format!(
                         "Unknown message type: {}",
                         other
                     )));
                 }
-                None => {
-                    log::error!("{}: Missing 'type' field in message", self.name);
-                    return Err(OrderBookActorError::MissingField(
-                        "Missing 'type' field in message".to_string(),
-                    ));
-                }
             };
-
-            // Process based on message type
             match message_type {
-                OrderBookMessageType::Change => match self.process_update(&data).await {
+                OrderBookMessageType::Change => match self.process_update(&raw_order_book_data).await {
                     ProcessMessageResult::Ok => {}
                     ProcessMessageResult::ErrRequiresResub(_) => {
                         resubscribe_needed = true;
                     }
-                    ProcessMessageResult::ErrNoResub(err) => return Err(err),
+                    ProcessMessageResult::ErrNoResub(err) => return Err(err)
                 },
-                OrderBookMessageType::Snapshot => match self.process_snapshot(&data).await {
+                OrderBookMessageType::Snapshot => match self.process_snapshot(&raw_order_book_data).await {
                     ProcessMessageResult::Ok => {}
                     ProcessMessageResult::ErrRequiresResub(_) => {
                         resubscribe_needed = true;
                     }
-                    ProcessMessageResult::ErrNoResub(err) => return Err(err),
+                    ProcessMessageResult::ErrNoResub(err) => return Err(err)
                 },
             }
+
+            // Update the actors's exchange timestamp
+            self.exch_timestamp = Some(raw_order_book_data.timestamp);
 
             // Send processed data to BroadcastActor
             self.send_processed_data(topic).await?;
@@ -282,92 +291,57 @@ impl OrderBookActor {
         // Send resubscribe command if necessary
         if resubscribe_needed {
             if let Err(send_err) = self.send_resubscribe_command().await {
-                log::error!(
-                    "{}: Failed to send resubscribe command: {:?}",
-                    self.name,
-                    send_err
-                );
+                log::error!("{}: Failed to send resubscribe command: {:?}", self.name, send_err);
             }
         }
     }
 
-    async fn process_snapshot(&mut self, data: &serde_json::Value) -> ProcessMessageResult {
-        if let Err(err) = self.update_stored_change_id(data).await {
-            log::error!(
-                "{}: Error extracting change_id: {:?}, triggering resubscribe",
-                self.name,
-                err
-            );
-            return ProcessMessageResult::ErrRequiresResub(err);
-        }
+    async fn process_snapshot(&mut self, data: &RawOrderBookData) -> ProcessMessageResult {
 
-        // Insert snapshot bids/asks
+        
         for side in &[OrderBookSide::Bids, OrderBookSide::Asks] {
-            if let Some(updates) = data[side.as_str()].as_array() {
-                let mut normalised_updates = Vec::new();
-                for update in updates {
-                    if let (Some(update_type_str), Some(price), Some(size)) =
-                        (update[0].as_str(), update[1].as_f64(), update[2].as_f64())
-                    {
-                        if let Some(update_type) = OrderBookUpdate::from_str(update_type_str) {
-                            match self.normalise_price(price).await {
-                                Ok(normalised_price) => {
-                                    normalised_updates.push((update_type, normalised_price, size));
-                                }
-                                Err(err) => {
-                                    log::error!(
-                                        "{}: Error normalising price: {:?}",
-                                        self.name,
-                                        err
-                                    );
-                                    return ProcessMessageResult::ErrRequiresResub(err);
-                                }
-                            }
-                        } else {
-                            log::error!("{}: Invalid update_type: {}", self.name, update_type_str);
-                            return ProcessMessageResult::ErrRequiresResub(
-                                OrderBookActorError::ValidationError(format!(
-                                    "Invalid update_type: {}",
-                                    update_type_str
-                                )),
-                            );
-                        }
-                    } else {
-                        log::error!(
-                            "{}: Malformed update entry in snapshot: {:?}",
-                            self.name,
-                            update
-                        );
-                        return ProcessMessageResult::ErrRequiresResub(
-                            OrderBookActorError::ValidationError(
-                                "Malformed update entry in snapshot".to_string(),
-                            ),
-                        );
-                    }
-                }
+            let updates = match side {
+                OrderBookSide::Bids => &data.bids,
+                OrderBookSide::Asks => &data.asks
+            };
 
-                let map = side.get_map(self);
-                for (update_type, normalised_price, size) in normalised_updates {
-                    match update_type {
-                        OrderBookUpdate::New => {
-                            map.insert(normalised_price, size);
+            let mut normalised_updates = Vec::new();
+            for update in updates {
+                if let Some(update_type) = OrderBookUpdate::from_str(&update.0) {
+                    match self.normalise_price(update.1).await {
+                        Ok(normalised_price) => {
+                            normalised_updates.push((update_type, normalised_price, update.2))
                         }
-                        _ => {
-                            log::error!(
-                                "Unexpected update_type in snapshot message: {}",
-                                update_type
-                            );
+                        Err(err) => {
+                            log::error!("{}: Failed to normalise price in snapshot: {}", self.name, err);
+                            return ProcessMessageResult::ErrRequiresResub(err);
                         }
                     }
+                } else {
+                    log::error!("{}: Invalid update_type: {}", self.name, update.0);
+                    return ProcessMessageResult::ErrRequiresResub(
+                        OrderBookActorError::ValidationError(format!(
+                            "Invalid update_type: {}",
+                            update.0
+                        )),
+                    );
+                }
+            }
+            let map = side.get_map(self);
+            for (update_type, normalised_price, size) in normalised_updates {
+                if update_type == OrderBookUpdate::New {
+                    map.insert(normalised_price, size);
+                } else {
+                    log::error!("Unexpected update_type in snapshot message: {}", update_type);
                 }
             }
         }
-
+        self.change_id = Some(data.change_id);
         ProcessMessageResult::Ok
     }
 
-    async fn check_prev_change_id(&self, data: &serde_json::Value) -> OrderBookResult<()> {
-        if let Some(prev_change_id) = data.get("prev_change_id").and_then(|v| v.as_u64()) {
+    async fn check_prev_change_id(&self, data: &RawOrderBookData) -> OrderBookResult<()> {
+        if let Some(prev_change_id) = data.prev_change_id {
             if Some(prev_change_id) != self.change_id {
                 log::error!(
                     "{}: prev_change_id mismatch. Expected: {:?}, Received: {}",
@@ -390,7 +364,7 @@ impl OrderBookActor {
         Ok(())
     }
 
-    async fn process_update(&mut self, data: &serde_json::Value) -> ProcessMessageResult {
+    async fn process_update(&mut self, data: &RawOrderBookData) -> ProcessMessageResult {
         if let Err(err) = self.check_prev_change_id(data).await {
             log::error!(
                 "{}: Could not validate prev_change_id on update: {:?}",
@@ -399,76 +373,58 @@ impl OrderBookActor {
             );
             return ProcessMessageResult::ErrRequiresResub(err);
         }
-
-        if let Err(err) = self.update_stored_change_id(data).await {
-            log::error!(
-                "{}: Error extracting change_id: {:?}, triggering resubscribe",
-                self.name,
-                err
-            );
-            return ProcessMessageResult::ErrRequiresResub(err);
-        }
-
+        
+        self.change_id = Some(data.change_id);
+    
         for side in &[OrderBookSide::Bids, OrderBookSide::Asks] {
-            if let Some(updates) = data[side.as_str()].as_array() {
-                let mut normalised_updates = Vec::new();
-                for update in updates {
-                    if let (Some(update_type_str), Some(price), Some(size)) =
-                        (update[0].as_str(), update[1].as_f64(), update[2].as_f64())
-                    {
-                        if let Some(update_type) = OrderBookUpdate::from_str(update_type_str) {
-                            match self.normalise_price(price).await {
-                                Ok(normalised_price) => {
-                                    normalised_updates.push((update_type, normalised_price, size));
-                                }
-                                Err(err) => {
-                                    log::error!(
-                                        "{}: Error normalising price in update: {:?}",
-                                        self.name,
-                                        err
-                                    );
-                                    return ProcessMessageResult::ErrRequiresResub(err);
-                                }
-                            }
-                        } else {
-                            log::error!("{}: Invalid update_type: {}", self.name, update_type_str);
-                            return ProcessMessageResult::ErrRequiresResub(
-                                OrderBookActorError::ValidationError(format!(
-                                    "Invalid update_type: {}",
-                                    update_type_str
-                                )),
+            let updates = match side {
+                OrderBookSide::Bids => &data.bids,
+                OrderBookSide::Asks => &data.asks,
+            };
+    
+            let mut normalised_updates = Vec::new();
+            for update in updates {
+                if let Some(update_type) = OrderBookUpdate::from_str(&update.0) {
+                    match self.normalise_price(update.1).await {
+                        Ok(normalised_price) => {
+                            normalised_updates.push((update_type, normalised_price, update.2));
+                        }
+                        Err(err) => {
+                            log::error!(
+                                "{}: Error normalising price in update: {:?}",
+                                self.name,
+                                err
                             );
+                            return ProcessMessageResult::ErrRequiresResub(err);
                         }
-                    } else {
-                        log::error!(
-                            "{}: Malformed update entry, skipping: {:?}",
-                            self.name,
-                            update
-                        );
-                        return ProcessMessageResult::ErrRequiresResub(
-                            OrderBookActorError::ValidationError(
-                                "Malformed update entry in update message".to_string(),
-                            ),
-                        );
                     }
+                } else {
+                    log::error!("{}: Invalid update_type: {}", self.name, update.0);
+                    return ProcessMessageResult::ErrRequiresResub(
+                        OrderBookActorError::ValidationError(format!(
+                            "Invalid update_type: {}",
+                            update.0
+                        )),
+                    );
                 }
-
-                let map = side.get_map(self);
-                for (update_type, normalised_price, size) in normalised_updates {
-                    match update_type {
-                        OrderBookUpdate::New | OrderBookUpdate::Change => {
-                            map.insert(normalised_price, size);
-                        }
-                        OrderBookUpdate::Delete => {
-                            map.remove(&normalised_price);
-                        }
+            }
+    
+            let map = side.get_map(self);
+            for (update_type, normalised_price, size) in normalised_updates {
+                match update_type {
+                    OrderBookUpdate::New | OrderBookUpdate::Change => {
+                        map.insert(normalised_price, size);
+                    }
+                    OrderBookUpdate::Delete => {
+                        map.remove(&normalised_price);
                     }
                 }
             }
         }
-
+    
         ProcessMessageResult::Ok
     }
+    
 
     async fn send_resubscribe_command(&self) -> Result<(), OrderBookActorError> {
         if let Err(err) = self
@@ -487,34 +443,26 @@ impl OrderBookActor {
         Ok(())
     }
 
-    async fn update_stored_change_id(
-        &mut self,
-        data: &serde_json::Value,
-    ) -> Result<(), OrderBookActorError> {
-        let change_id = data
-            .get("change_id")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| {
-                OrderBookActorError::MissingField("Missing or invalid change_id".to_string())
-            })?;
-
-        self.change_id = Some(change_id);
-        Ok(())
-    }
-
     pub async fn send_processed_data(&self, topic: String) -> Result<(), OrderBookActorError> {
-        let bids: Vec<(OrderedF64, f64)> = self
+        let mut bids: Vec<(OrderedF64, f64)> = self
             .bids
             .iter()
             .map(|(&price, &size)| (price, size))
             .collect();
+        bids.sort_by(|a, b| b.0.cmp(&a.0));
+
         let asks: Vec<(OrderedF64, f64)> = self
             .asks
             .iter()
             .map(|(&price, &size)| (price, size))
             .collect();
 
-        let processed_data = ProcessedOrderBookData { topic, bids, asks };
+        let exch_timestamp = self
+            .exch_timestamp
+            .ok_or_else(|| OrderBookActorError::ValidationError("Missing exchange timestamp".to_string()))?;
+        
+
+        let processed_data = ProcessedOrderBookData { topic, bids, asks, exch_timestamp};
 
         // Send to the broadcast channel
         if let Err(err) = self.broadcast.send(processed_data).await {
@@ -556,6 +504,7 @@ mod tests {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             change_id: None,
+            exch_timestamp: None,
             parsed_data_receiver: mock_parsed_data_receiver, // Use the receiver here
             broadcast: mock_broadcast,
             ws_command_sender: mock_ws_command_sender,
@@ -634,6 +583,7 @@ mod tests {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             change_id: None,
+            exch_timestamp: None,
             parsed_data_receiver: mock_parsed_data_receiver, // Use the receiver here
             broadcast: mock_broadcast,
             ws_command_sender: mock_ws_command_sender,
@@ -654,13 +604,13 @@ mod tests {
     async fn test_send_processed_data() {
         init_test_logger();
         let (data_sender, mut data_receiver) = mpsc::channel(10);
-        let (_, mock_parsed_data_receiver) = mpsc::channel(10); // Mock ParsedMessage channel
+        let (_, mock_parsed_data_receiver) = mpsc::channel(10);
         let config = StreamConfig::current();
 
         let mut actor = OrderBookActor::new(
             "TestOrderBookActor",
             &config,
-            mock_parsed_data_receiver, // Provide the mock receiver
+            mock_parsed_data_receiver,
             data_sender,
             mpsc::channel(10).0,
         );
@@ -668,15 +618,16 @@ mod tests {
         // Populate the order book
         actor.bids.insert(OrderedF64(30000.0), 1.0);
         actor.asks.insert(OrderedF64(30001.0), 1.5);
+        actor.exch_timestamp = Some(123456789);
 
         // Send processed data
-        let topic = format!("{}.{}", config.internal_symbol, config.requested_feed);
+        let topic = "test_topic".to_string();
         actor.send_processed_data(topic.clone()).await.unwrap();
 
         // Verify the data sent to the channel
         if let Some(processed_data) = data_receiver.recv().await {
-            log::info!("Processed data received: {:?}", processed_data); // Log the processed data
-            assert_eq!(processed_data.topic, topic); // Ensure topic matches
+            assert_eq!(processed_data.topic, topic);
+            assert_eq!(processed_data.exch_timestamp, 123456789);
             assert_eq!(processed_data.bids, vec![(OrderedF64(30000.0), 1.0)]);
             assert_eq!(processed_data.asks, vec![(OrderedF64(30001.0), 1.5)]);
         } else {
@@ -684,13 +635,14 @@ mod tests {
         }
     }
 
+
     #[tokio::test]
     async fn test_send_processed_data_empty_order_book() {
         init_test_logger();
         let (data_sender, mut data_receiver) = mpsc::channel(10);
         let config = StreamConfig::current();
 
-        let actor = OrderBookActor::new(
+        let mut actor = OrderBookActor::new(
             "TestOrderBookActor",
             &config,
             mpsc::channel(10).1,
@@ -698,21 +650,23 @@ mod tests {
             mpsc::channel(10).0,
         );
 
-        // Send processed data with an empty order book
-        let topic = format!("{}.{}", config.internal_symbol, config.requested_feed);
-        actor.send_processed_data(topic).await.unwrap();
+        actor.exch_timestamp = Some(123456789);
 
-        let topic = format!("{}.{}", config.internal_symbol, config.requested_feed);
+        // Send processed data with an empty order book
+        let topic = "test_topic".to_string();
+        actor.send_processed_data(topic.clone()).await.unwrap();
 
         // Verify the data sent to the channel
         if let Some(processed_data) = data_receiver.recv().await {
             assert_eq!(processed_data.topic, topic);
+            assert_eq!(processed_data.exch_timestamp, 123456789);
             assert!(processed_data.bids.is_empty());
             assert!(processed_data.asks.is_empty());
         } else {
             panic!("No data received in the broadcast channel");
         }
     }
+
 
     #[tokio::test]
     async fn test_send_processed_data_channel_closed() {
@@ -728,17 +682,18 @@ mod tests {
             mpsc::channel(10).0,
         );
 
-        // Populate the order book
         actor.bids.insert(OrderedF64(30000.0), 1.0);
         actor.asks.insert(OrderedF64(30001.0), 1.5);
+        actor.exch_timestamp = Some(123456789);
 
         // Attempt to send processed data
-        let topic = format!("{}.{}", config.internal_symbol, config.requested_feed);
+        let topic = "test_topic".to_string();
         let result = actor.send_processed_data(topic).await;
 
         // Verify that an error is returned
         assert!(result.is_err());
     }
+
 
     #[tokio::test]
     async fn test_empty_parsed_message() {
@@ -770,4 +725,62 @@ mod tests {
         assert_eq!(actor.bids.len(), 0);
         assert_eq!(actor.asks.len(), 0);
     }
+
+        #[tokio::test]
+    async fn test_send_processed_data_sorted() {
+        let (data_sender, mut data_receiver) = mpsc::channel(10);
+        let (_, mock_parsed_data_receiver) = mpsc::channel(10);
+        let config = StreamConfig::current();
+
+        let mut actor = OrderBookActor::new(
+            "TestOrderBookActor",
+            &config,
+            mock_parsed_data_receiver,
+            data_sender,
+            mpsc::channel(10).0,
+        );
+
+        actor.bids.insert(OrderedF64(101.0), 5.0);
+        actor.bids.insert(OrderedF64(102.0), 3.0);
+        actor.bids.insert(OrderedF64(100.0), 2.0);
+
+        actor.asks.insert(OrderedF64(103.0), 2.0);
+        actor.asks.insert(OrderedF64(104.0), 1.0);
+        actor.asks.insert(OrderedF64(102.0), 4.0);
+
+        actor.exch_timestamp = Some(123456789);
+
+        // Send processed data
+        let topic = "test_topic".to_string();
+        actor.send_processed_data(topic.clone()).await.unwrap();
+
+        // Verify the data sent to the channel
+        if let Some(processed_data) = data_receiver.recv().await {
+            assert_eq!(processed_data.topic, topic);
+            assert_eq!(processed_data.exch_timestamp, 123456789);
+
+            // Ensure bids are sorted in descending order
+            assert_eq!(
+                processed_data.bids,
+                vec![
+                    (OrderedF64(102.0), 3.0),
+                    (OrderedF64(101.0), 5.0),
+                    (OrderedF64(100.0), 2.0)
+                ]
+            );
+
+            // Ensure asks are sorted in ascending order
+            assert_eq!(
+                processed_data.asks,
+                vec![
+                    (OrderedF64(102.0), 4.0),
+                    (OrderedF64(103.0), 2.0),
+                    (OrderedF64(104.0), 1.0)
+                ]
+            );
+        } else {
+            panic!("No data received in the broadcast channel");
+        }
+    }
+
 }

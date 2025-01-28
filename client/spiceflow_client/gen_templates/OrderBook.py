@@ -81,8 +81,15 @@ class OrderBook(object):
         o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(8))
         return o == 0
 
+    # OrderBook
+    def ExchTimestamp(self):
+        o = flatbuffers.number_types.UOffsetTFlags.py_type(self._tab.Offset(10))
+        if o != 0:
+            return self._tab.Get(flatbuffers.number_types.Uint64Flags, o + self._tab.Pos)
+        return 0
+
 def OrderBookStart(builder):
-    builder.StartObject(3)
+    builder.StartObject(4)
 
 def Start(builder):
     OrderBookStart(builder)
@@ -116,6 +123,12 @@ def OrderBookStartAsksVector(builder, numElems):
 
 def StartAsksVector(builder, numElems):
     return OrderBookStartAsksVector(builder, numElems)
+
+def OrderBookAddExchTimestamp(builder, exchTimestamp):
+    builder.PrependUint64Slot(3, exchTimestamp, 0)
+
+def AddExchTimestamp(builder, exchTimestamp):
+    OrderBookAddExchTimestamp(builder, exchTimestamp)
 
 def OrderBookEnd(builder):
     return builder.EndObject()
