@@ -6,6 +6,7 @@ use server::actors::ob::OrderBookActor;
 use server::actors::router::{DeribitMessageRouter, ParsedMessage};
 use server::actors::stream_config::StreamConfig;
 use server::actors::ws::WebSocketActor;
+use server::actors::orch::{Orchestrator, OrchestratorMessage};
 use tokio::sync::mpsc;
 
 const CHANNEL_BUFFER_SIZE: usize = 10;
@@ -46,6 +47,10 @@ async fn main() {
         .bind("tcp://*:5555")
         .expect("Failed to bind ZeroMQ socket");
 
+    // Prototype Orchestrator
+    let (tx, rx) = mpsc::channel(32);
+    let mut orchestrator = Orchestrator::new(rx);
+
     // Create channels
     // WS to Router
     let (ws_router_sender, ws_router_receiver) = mpsc::channel::<String>(CHANNEL_BUFFER_SIZE);
@@ -70,14 +75,14 @@ async fn main() {
         broadcast,
         ws_command_sender,
     );
-    let mut ws_actor = WebSocketActor::new("WebSocketActor", ws_router_sender, ws_command_receiver);
     let mut router_actor = DeribitMessageRouter::new(ws_router_receiver, parsed_data_sender);
+
+    orchestrator.spawn_websocket_actor(ws_router_sender, ws_command_receiver);
 
     // Run the actors concurrently
     tokio::join!(
         broadcast_actor.run(),
         order_book_actor.run(),
-        ws_actor.run(),
         router_actor.run()
     );
 }

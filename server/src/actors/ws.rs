@@ -1,4 +1,4 @@
-use super::stream_config::StreamConfig;
+use super::orch::ActorConfig;
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use log;
@@ -78,26 +78,29 @@ struct SubscriptionRequestParams<'a> {
 }
 
 pub struct WebSocketActor {
+    actor_config: ActorConfig,
     name: String,
-    write: Option<SplitSink<WsStream, Message>>,
-    read: Option<futures_util::stream::SplitStream<WsStream>>,
-    router: mpsc::Sender<String>,
-    ws_command_receiver: mpsc::Receiver<WebSocketCommand>,
+    exchange_write: Option<SplitSink<WsStream, Message>>,
+    exchange_read: Option<futures_util::stream::SplitStream<WsStream>>,
+    router_write: mpsc::Sender<String>,
+    ws_command_read: mpsc::Receiver<WebSocketCommand>,
 }
 
 impl WebSocketActor {
     // Creates a new WebSocketActor with a name and a list of channels to subscribe to.
     pub fn new(
+        actor_config: ActorConfig,
         name: &str,
-        router: mpsc::Sender<String>,
-        ws_command_receiver: mpsc::Receiver<WebSocketCommand>,
+        router_write: mpsc::Sender<String>,
+        ws_command_read: mpsc::Receiver<WebSocketCommand>,
     ) -> Self {
         Self {
+            actor_config,
             name: name.to_string(),
-            write: None,
-            read: None,
-            router,
-            ws_command_receiver,
+            exchange_write: None,
+            exchange_read: None,
+            router_write,
+            ws_command_read,
         }
     }
 
@@ -111,16 +114,16 @@ impl WebSocketActor {
         loop {
             tokio::select! {
                 // Handle incoming commands from the WebSocket command receiver
-                Some(command) = self.ws_command_receiver.recv() => {
+                Some(command) = self.ws_command_read.recv() => {
                     self.handle_command(command).await;
                 }
 
                 // Continuously read and forward WebSocket messages
-                result = self.read.as_mut().unwrap().next() => {
+                result = self.exchange_read.as_mut().unwrap().next() => {
                     match result {
                         // Handle the case where the stream returns `Some(Result::Ok)`
                         Some(Ok(Message::Text(text))) => {
-                            if let Err(err) = self.router.send(text.to_string()).await {
+                            if let Err(err) = self.router_write.send(text.to_string()).await {
                                 log::warn!("{}: Failed to forward message to OrderBookActor: {}", self.name, err);
                             }
                         }
@@ -160,8 +163,8 @@ impl WebSocketActor {
             Ok(ws_stream) => {
                 log::info!("{}: WS connection established to {}", self.name, url);
                 let (_write, _read) = ws_stream.split();
-                self.write = Some(_write);
-                self.read = Some(_read)
+                self.exchange_write = Some(_write);
+                self.exchange_read = Some(_read)
             }
             Err(err) => {
                 log::error!("{}: Failed to create WebSocket stream: {}", self.name, err);
@@ -184,19 +187,19 @@ impl WebSocketActor {
     }
 
     async fn subscribe(&mut self) {
-        let config = StreamConfig::current();
-        log::info!("{}: Subscribing to {}", self.name, config.internal_symbol);
+        // let config = StreamConfig::current();
+        log::info!("{}: Subscribing to {}", self.name, self.actor_config.internal_symbol);
 
         // Check if write is initialised
-        if self.write.is_none() {
+        if self.exchange_write.is_none() {
             log::error!("{}: Write stream is not initialised", self.name);
             return;
         }
 
-        if let Some(write) = &mut self.write {
+        if let Some(write) = &mut self.exchange_write {
             if let Some(message) = WebSocketActor::prepare_subscription_management_message(
                 SubscriptionManagementAction::Subscribe,
-                &config.channels,
+                &self.actor_config.channels,
             ) {
                 if let Err(err) = write.send(Message::Text(message.into())).await {
                     log::error!(
@@ -210,7 +213,7 @@ impl WebSocketActor {
                 log::info!(
                     "{}: Subscription message sent for channels: {:?}",
                     self.name,
-                    config.channels
+                    self.actor_config.channels
                 );
             } else {
                 log::error!("{}: Failed to prepare subscription message", self.name);
@@ -219,19 +222,18 @@ impl WebSocketActor {
     }
 
     async fn unsubscribe(&mut self) {
-        let config = StreamConfig::current();
-        log::info!("{}: Unsubscribing to {}", self.name, config.internal_symbol);
+        log::info!("{}: Unsubscribing to {}", self.name, self.actor_config.internal_symbol);
 
         // Check if write is initialised
-        if self.write.is_none() {
+        if self.exchange_write.is_none() {
             log::error!("{}: Write stream is not initialised", self.name);
             return;
         }
 
-        if let Some(write) = &mut self.write {
+        if let Some(write) = &mut self.exchange_write {
             if let Some(message) = WebSocketActor::prepare_subscription_management_message(
                 SubscriptionManagementAction::Unsubscribe,
-                &config.channels,
+                &self.actor_config.channels,
             ) {
                 if let Err(err) = write.send(Message::Text(message.into())).await {
                     log::error!("{}: Failed to send unsubscripe message: {}", self.name, err);
@@ -241,7 +243,7 @@ impl WebSocketActor {
                 log::info!(
                     "{}: Unsubscribe message sent for channels: {:?}",
                     self.name,
-                    config.channels
+                    self.actor_config.channels
                 );
             } else {
                 log::error!("{}: Failed to prepare unsubscribe message", self.name);
@@ -263,7 +265,7 @@ impl WebSocketActor {
     }
 
     async fn stay_alive(&mut self) {
-        if let Some(write) = &mut self.write {
+        if let Some(write) = &mut self.exchange_write {
             // Send pre-defined stay-alive message
             if let Err(err) = write.send(STAY_ALIVE_MESSAGE.clone()).await {
                 log::warn!(
