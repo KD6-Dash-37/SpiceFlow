@@ -126,6 +126,7 @@ impl<S: ZmqSocketInterface> BroadcastActor<S> {
                 topic: Some(instrument_name),
                 bids: Some(bids_vector),
                 asks: Some(asks_vector),
+                exch_timestamp: data.exch_timestamp,
             },
         );
 
@@ -226,6 +227,7 @@ mod tests {
             topic,
             bids: vec![(OrderedF64(30000.0), 1.0), (OrderedF64(29999.0), 2.5)],
             asks: vec![(OrderedF64(30001.0), 1.5), (OrderedF64(30002.0), 0.5)],
+            exch_timestamp: 1554373962454,
         };
 
         // Create mock socket
@@ -287,6 +289,7 @@ mod tests {
             topic,
             bids: vec![(OrderedF64(30000.0), 1.0)],
             asks: vec![(OrderedF64(30001.0), 1.5)],
+            exch_timestamp: 1554373962454,
         };
         sender.send(processed_data).await.unwrap();
 
@@ -355,6 +358,7 @@ mod tests {
             topic,
             bids: vec![(OrderedF64(30000.0), 1.0)],
             asks: vec![(OrderedF64(30001.0), 1.5)],
+            exch_timestamp: 1554373962454,
         };
 
         // Attempt to broadcast
