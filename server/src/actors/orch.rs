@@ -10,7 +10,9 @@ pub struct Orchestrator {
 
 #[derive(Debug, Clone)]
 struct ActorMetaData {
+    #[warn(dead_code)]
     actor_type: String,
+    #[warn(dead_code)]
     config: ActorConfig,
 }
 

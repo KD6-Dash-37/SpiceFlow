@@ -5,8 +5,7 @@ use server::actors::bc::BroadcastActor;
 use server::actors::ob::OrderBookActor;
 use server::actors::router::{DeribitMessageRouter, ParsedMessage};
 use server::actors::stream_config::StreamConfig;
-use server::actors::ws::WebSocketActor;
-use server::actors::orch::{Orchestrator, OrchestratorMessage};
+use server::actors::orch::Orchestrator;
 use tokio::sync::mpsc;
 
 const CHANNEL_BUFFER_SIZE: usize = 10;
