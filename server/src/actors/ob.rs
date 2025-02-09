@@ -2,11 +2,11 @@ use super::router::ParsedMessage;
 use super::stream_config::StreamConfig;
 use super::ws::WebSocketCommand;
 use log;
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt;
 use thiserror::Error;
 use tokio::sync::mpsc;
-use serde::Deserialize;
 
 #[derive(Debug, Error)]
 pub enum OrderBookActorError {
@@ -46,7 +46,6 @@ enum OrderBookSide {
 }
 
 impl OrderBookSide {
-
     fn get_map<'a>(&self, actor: &'a mut OrderBookActor) -> &'a mut BTreeMap<OrderedF64, f64> {
         match self {
             OrderBookSide::Bids => &mut actor.bids,
@@ -89,7 +88,7 @@ pub struct ProcessedOrderBookData {
     pub topic: String,
     pub bids: Vec<(OrderedF64, f64)>,
     pub asks: Vec<(OrderedF64, f64)>,
-    pub exch_timestamp: u64
+    pub exch_timestamp: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -241,10 +240,11 @@ impl OrderBookActor {
 
         if let Err(err) = async {
             // Deserialize the JSON data into the structured format
-            let raw_order_book_data: RawOrderBookData = serde_json::from_value(data).map_err(|e| {
-                log::error!("{}: Failed to deserialize OrderBookData: {}", self.name, e);
-                OrderBookActorError::JsonParseError(e)
-            })?;
+            let raw_order_book_data: RawOrderBookData =
+                serde_json::from_value(data).map_err(|e| {
+                    log::error!("{}: Failed to deserialize OrderBookData: {}", self.name, e);
+                    OrderBookActorError::JsonParseError(e)
+                })?;
 
             // Determine the message type
             let message_type = match raw_order_book_data.r#type.as_str() {
@@ -259,20 +259,24 @@ impl OrderBookActor {
                 }
             };
             match message_type {
-                OrderBookMessageType::Change => match self.process_update(&raw_order_book_data).await {
-                    ProcessMessageResult::Ok => {}
-                    ProcessMessageResult::ErrRequiresResub(_) => {
-                        resubscribe_needed = true;
+                OrderBookMessageType::Change => {
+                    match self.process_update(&raw_order_book_data).await {
+                        ProcessMessageResult::Ok => {}
+                        ProcessMessageResult::ErrRequiresResub(_) => {
+                            resubscribe_needed = true;
+                        }
+                        ProcessMessageResult::ErrNoResub(err) => return Err(err),
                     }
-                    ProcessMessageResult::ErrNoResub(err) => return Err(err)
-                },
-                OrderBookMessageType::Snapshot => match self.process_snapshot(&raw_order_book_data).await {
-                    ProcessMessageResult::Ok => {}
-                    ProcessMessageResult::ErrRequiresResub(_) => {
-                        resubscribe_needed = true;
+                }
+                OrderBookMessageType::Snapshot => {
+                    match self.process_snapshot(&raw_order_book_data).await {
+                        ProcessMessageResult::Ok => {}
+                        ProcessMessageResult::ErrRequiresResub(_) => {
+                            resubscribe_needed = true;
+                        }
+                        ProcessMessageResult::ErrNoResub(err) => return Err(err),
                     }
-                    ProcessMessageResult::ErrNoResub(err) => return Err(err)
-                },
+                }
             }
 
             // Update the actors's exchange timestamp
@@ -291,18 +295,20 @@ impl OrderBookActor {
         // Send resubscribe command if necessary
         if resubscribe_needed {
             if let Err(send_err) = self.send_resubscribe_command().await {
-                log::error!("{}: Failed to send resubscribe command: {:?}", self.name, send_err);
+                log::error!(
+                    "{}: Failed to send resubscribe command: {:?}",
+                    self.name,
+                    send_err
+                );
             }
         }
     }
 
     async fn process_snapshot(&mut self, data: &RawOrderBookData) -> ProcessMessageResult {
-
-        
         for side in &[OrderBookSide::Bids, OrderBookSide::Asks] {
             let updates = match side {
                 OrderBookSide::Bids => &data.bids,
-                OrderBookSide::Asks => &data.asks
+                OrderBookSide::Asks => &data.asks,
             };
 
             let mut normalised_updates = Vec::new();
@@ -313,7 +319,11 @@ impl OrderBookActor {
                             normalised_updates.push((update_type, normalised_price, update.2))
                         }
                         Err(err) => {
-                            log::error!("{}: Failed to normalise price in snapshot: {}", self.name, err);
+                            log::error!(
+                                "{}: Failed to normalise price in snapshot: {}",
+                                self.name,
+                                err
+                            );
                             return ProcessMessageResult::ErrRequiresResub(err);
                         }
                     }
@@ -332,7 +342,10 @@ impl OrderBookActor {
                 if update_type == OrderBookUpdate::New {
                     map.insert(normalised_price, size);
                 } else {
-                    log::error!("Unexpected update_type in snapshot message: {}", update_type);
+                    log::error!(
+                        "Unexpected update_type in snapshot message: {}",
+                        update_type
+                    );
                 }
             }
         }
@@ -373,15 +386,15 @@ impl OrderBookActor {
             );
             return ProcessMessageResult::ErrRequiresResub(err);
         }
-        
+
         self.change_id = Some(data.change_id);
-    
+
         for side in &[OrderBookSide::Bids, OrderBookSide::Asks] {
             let updates = match side {
                 OrderBookSide::Bids => &data.bids,
                 OrderBookSide::Asks => &data.asks,
             };
-    
+
             let mut normalised_updates = Vec::new();
             for update in updates {
                 if let Some(update_type) = OrderBookUpdate::from_str(&update.0) {
@@ -408,7 +421,7 @@ impl OrderBookActor {
                     );
                 }
             }
-    
+
             let map = side.get_map(self);
             for (update_type, normalised_price, size) in normalised_updates {
                 match update_type {
@@ -421,10 +434,9 @@ impl OrderBookActor {
                 }
             }
         }
-    
+
         ProcessMessageResult::Ok
     }
-    
 
     async fn send_resubscribe_command(&self) -> Result<(), OrderBookActorError> {
         if let Err(err) = self
@@ -457,12 +469,16 @@ impl OrderBookActor {
             .map(|(&price, &size)| (price, size))
             .collect();
 
-        let exch_timestamp = self
-            .exch_timestamp
-            .ok_or_else(|| OrderBookActorError::ValidationError("Missing exchange timestamp".to_string()))?;
-        
+        let exch_timestamp = self.exch_timestamp.ok_or_else(|| {
+            OrderBookActorError::ValidationError("Missing exchange timestamp".to_string())
+        })?;
 
-        let processed_data = ProcessedOrderBookData { topic, bids, asks, exch_timestamp};
+        let processed_data = ProcessedOrderBookData {
+            topic,
+            bids,
+            asks,
+            exch_timestamp,
+        };
 
         // Send to the broadcast channel
         if let Err(err) = self.broadcast.send(processed_data).await {
@@ -635,7 +651,6 @@ mod tests {
         }
     }
 
-
     #[tokio::test]
     async fn test_send_processed_data_empty_order_book() {
         init_test_logger();
@@ -667,7 +682,6 @@ mod tests {
         }
     }
 
-
     #[tokio::test]
     async fn test_send_processed_data_channel_closed() {
         init_test_logger();
@@ -693,7 +707,6 @@ mod tests {
         // Verify that an error is returned
         assert!(result.is_err());
     }
-
 
     #[tokio::test]
     async fn test_empty_parsed_message() {
@@ -726,7 +739,7 @@ mod tests {
         assert_eq!(actor.asks.len(), 0);
     }
 
-        #[tokio::test]
+    #[tokio::test]
     async fn test_send_processed_data_sorted() {
         let (data_sender, mut data_receiver) = mpsc::channel(10);
         let (_, mock_parsed_data_receiver) = mpsc::channel(10);
@@ -782,5 +795,4 @@ mod tests {
             panic!("No data received in the broadcast channel");
         }
     }
-
 }

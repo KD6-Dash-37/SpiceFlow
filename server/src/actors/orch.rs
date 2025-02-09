@@ -1,6 +1,6 @@
+use super::ws::{WebSocketActor, WebSocketCommand};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use super::ws::{WebSocketActor, WebSocketCommand};
 
 #[derive(Debug)]
 pub struct Orchestrator {
@@ -31,13 +31,12 @@ pub struct ActorConfig {
 }
 
 pub enum OrchestratorMessage {
-    CreateWebSocketActor {instrument: String},
-    StopActor {actor_id: String},
-    GetActorState {actor_id: String}
+    CreateWebSocketActor { instrument: String },
+    StopActor { actor_id: String },
+    GetActorState { actor_id: String },
 }
 
 impl Orchestrator {
-
     pub fn new(message_receiver: mpsc::Receiver<OrchestratorMessage>) -> Self {
         Self {
             actor_registry: HashMap::new(),
@@ -67,16 +66,16 @@ impl Orchestrator {
     // Stub for creating a WebSocket actor
     async fn create_websocket_actor(&mut self, instrument: String) {
         let actor_id = format!("WebSocketActor-{}", instrument);
-        
+
         let actor_metadata = ActorMetaData {
             actor_type: "WebSocketActor".to_string(),
-            config: ActorConfig { 
+            config: ActorConfig {
                 actor_id: actor_id.clone(),
                 exchange_symbol: "BTC-PERPETUAL".to_string(),
                 internal_symbol: "Deribit.InvFut.BTC.USD".to_string(),
                 requested_feed: RequestedFeed::OrderBook,
                 channels: vec!["book.BTC-PERPETUAL.100ms".to_string()],
-             }
+            },
         };
         self.actor_registry.insert(actor_id.clone(), actor_metadata);
         println!("Actor created: {}", actor_id);
@@ -85,17 +84,16 @@ impl Orchestrator {
     pub fn spawn_websocket_actor(
         &mut self,
         router_write: mpsc::Sender<String>,
-        ws_command_read: mpsc::Receiver<WebSocketCommand>
+        ws_command_read: mpsc::Receiver<WebSocketCommand>,
     ) {
-        
         let actor_id = "WebSocketActor".to_string();
-        let actor_config = ActorConfig { 
+        let actor_config = ActorConfig {
             actor_id: actor_id.clone(),
             exchange_symbol: "BTC-PERPETUAL".to_string(),
             internal_symbol: "Deribit.InvFut.BTC.USD".to_string(),
             requested_feed: RequestedFeed::OrderBook,
             channels: vec!["book.BTC-PERPETUAL.100ms".to_string()],
-         };
+        };
 
         // Check if actor already exists in the registry
         if self.actor_registry.contains_key(&actor_id) {
@@ -116,7 +114,7 @@ impl Orchestrator {
                 actor_config,
                 "WebSocketActor",
                 router_write,
-                ws_command_read
+                ws_command_read,
             );
             websocket_actor.run().await;
         });
