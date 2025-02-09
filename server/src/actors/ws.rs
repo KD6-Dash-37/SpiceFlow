@@ -188,7 +188,11 @@ impl WebSocketActor {
 
     async fn subscribe(&mut self) {
         // let config = StreamConfig::current();
-        log::info!("{}: Subscribing to {}", self.name, self.actor_config.internal_symbol);
+        log::info!(
+            "{}: Subscribing to {}",
+            self.name,
+            self.actor_config.internal_symbol
+        );
 
         // Check if write is initialised
         if self.exchange_write.is_none() {
@@ -222,7 +226,11 @@ impl WebSocketActor {
     }
 
     async fn unsubscribe(&mut self) {
-        log::info!("{}: Unsubscribing to {}", self.name, self.actor_config.internal_symbol);
+        log::info!(
+            "{}: Unsubscribing to {}",
+            self.name,
+            self.actor_config.internal_symbol
+        );
 
         // Check if write is initialised
         if self.exchange_write.is_none() {
@@ -284,7 +292,6 @@ impl WebSocketActor {
         }
     }
 }
-
 
 async fn connect_with_retry(
     url: &str,
