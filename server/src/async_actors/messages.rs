@@ -1,17 +1,20 @@
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-use crate::async_actors::common::{RequestedFeed, Subscription};
+use crate::async_actors::common::RequestedFeed;
+use crate::async_actors::subscription::ExchangeSubscription;
 use std::fmt;
 
 #[derive(Debug)]
 pub enum DummyRequest {
     Subscribe {
         internal_symbol: String,
+        exchange: String,
         exchange_symbol: String,
         requested_feed: RequestedFeed,
     },
     Unsubscribe {
         internal_symbol: String,
+        exchange: String,
         exchange_symbol: String,
         requested_feed: RequestedFeed,
     },
@@ -40,15 +43,15 @@ impl fmt::Display for WebSocketMessage {
 
 #[derive(Debug)]
 pub enum WebSocketCommand {
-    Subscribe(Subscription),
-    Unsubscribe(Subscription),
+    Subscribe(ExchangeSubscription),
+    Unsubscribe(ExchangeSubscription),
     Teardown,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExchangeMessage {
-    actor_id: String,
-    message: Message,
+    pub actor_id: String,
+    pub message: Message,
 }
 
 impl ExchangeMessage {
@@ -60,4 +63,28 @@ impl ExchangeMessage {
 #[derive(Clone)]
 pub enum RouterMessage {
     Heartbeat { actor_id: String },
+    ConfirmSubscribe {
+        ws_actor_id: String,
+        exchange_symbol: String,
+        feed_type: RequestedFeed,
+    },
+    ConfirmUnsubscribe {
+        ws_actor_id: String,
+        exchange_symbol: String,
+        feed_type: RequestedFeed,
+    }
+}
+
+pub enum RouterCommand {
+    Register {
+        subscription: ExchangeSubscription,
+    },
+    Remove {
+        subscription: ExchangeSubscription,
+    }
+}
+
+pub struct MarketData {
+    pub topic: String,
+    pub data: serde_json::Value,
 }

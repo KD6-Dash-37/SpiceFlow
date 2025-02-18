@@ -1,8 +1,10 @@
+use super::common::RequestedFeed;
 use super::deribit::router::DeribitRouterActor;
-use crate::async_actors::common::Subscription;
+use super::subscription::SubscriptionInfo;
+use crate::async_actors::subscription::{DeribitSubscription, ExchangeSubscription};
 use crate::async_actors::deribit::websocket::DeribitWebSocketActor;
 use crate::async_actors::messages::{
-    DummyRequest, ExchangeMessage, RouterMessage, WebSocketCommand, WebSocketMessage,
+    DummyRequest, ExchangeMessage, RouterMessage, RouterCommand, WebSocketCommand, WebSocketMessage,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,42 +24,52 @@ const CREATE_ROUTER_ACTOR_TIMEOUT: u64 = 3;
 const WS_MESSAGE_BUFFER_SIZE: usize = 32;
 const ROUTER_MESSAGE_BUFFER_SIZE: usize = 32;
 
-pub struct WebSocketMetaData {
+#[derive(Clone)]
+pub struct WebSocketMetadata {
     pub actor_id: String,
     pub command_sender: mpsc::Sender<WebSocketCommand>,
     pub router_actor_id: String,
-    pub subscribed_streams: HashSet<Subscription>,
+    pub requested_streams: HashSet<ExchangeSubscription>,
+    pub subscribed_streams: HashSet<ExchangeSubscription>,
     pub last_heartbeat: Option<Instant>,
 }
 
-impl WebSocketMetaData {
+impl WebSocketMetadata {
     pub fn new(
         actor_id: String,
         command_sender: mpsc::Sender<WebSocketCommand>,
         router_actor_id: String,
-        subscribed_streams: HashSet<Subscription>,
+        requested_streams: HashSet<ExchangeSubscription>,
     ) -> Self {
+        let subscribed_streams = HashSet::new();
         Self {
             actor_id,
             command_sender,
             router_actor_id,
+            requested_streams,
             subscribed_streams,
             last_heartbeat: None,
         }
     }
 }
 
-pub struct RouterMetaData {
+pub struct RouterMetadata {
     actor_id: String,
     router_sender: mpsc::Sender<ExchangeMessage>,
+    router_command_sender: mpsc::Sender<RouterCommand>,
     pub last_heartbeat: Option<Instant>,
 }
 
-impl RouterMetaData {
-    pub fn new(actor_id: String, router_sender: mpsc::Sender<ExchangeMessage>) -> Self {
+impl RouterMetadata {
+    pub fn new(
+        actor_id: String,
+        router_sender: mpsc::Sender<ExchangeMessage>,
+        router_command_sender: mpsc::Sender<RouterCommand>
+    ) -> Self {
         Self {
             actor_id,
             router_sender,
+            router_command_sender,
             last_heartbeat: None,
         }
     }
@@ -65,17 +77,19 @@ impl RouterMetaData {
 
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
-    #[error("RouterActor {actor_id} timed out waiting for heartbeat")]
+    #[error("❌ RouterActor {actor_id} timed out waiting for heartbeat")]
     RouterActorTimeout { actor_id: String },
-    #[error("WebSocketActor {actor_id} timed out waiting for heartbeat")]
+    #[error("❌ WebSocketActor {actor_id} timed out waiting for heartbeat")]
     WebSocketActorTimeout { actor_id: String },
-    #[error("RouterActor {actor_id} ws<>router channel is closed")]
+    #[error("❌ RouterActor {actor_id} ws<>router channel is closed")]
     RouterActorChannelClosed { actor_id: String },
+    #[error("❌ RouterActor not found")]
+    RouterActorMissing
 }
 
 pub struct Orchestrator {
-    websockets: HashMap<String, WebSocketMetaData>,
-    routers: HashMap<String, RouterMetaData>,
+    websockets: HashMap<String, WebSocketMetadata>,
+    routers: HashMap<String, RouterMetadata>,
     dummy_grpc_receiver: mpsc::Receiver<DummyRequest>,
     from_ws: mpsc::Receiver<WebSocketMessage>,
     ws_message_sender: mpsc::Sender<WebSocketMessage>,
@@ -125,6 +139,7 @@ impl Orchestrator {
         match grpc_request {
             DummyRequest::Subscribe {
                 internal_symbol,
+                exchange,
                 exchange_symbol,
                 requested_feed,
             } => {
@@ -132,22 +147,43 @@ impl Orchestrator {
                     "Received subscribe request for {internal_symbol}.{:?}",
                     requested_feed
                 );
-                let subscription =
-                    Subscription::new(internal_symbol, exchange_symbol, requested_feed);
-                self.subscribe_ws_actor(subscription).await;
+                let subscription = match exchange.as_str() {
+                    "Deribit" => ExchangeSubscription::Deribit(DeribitSubscription::new(
+                        internal_symbol,
+                        exchange_symbol,
+                        requested_feed,
+                    )),
+                    _ => {
+                        warn!("Unsupported exchange: {exchange}");
+                        return;
+                    }
+                };
+                if let Err(e) = self.subscribe_ws_actor(subscription).await {
+                    error!("❌ Subscription request failed: {:?}", e);
+                }
             }
+            
             DummyRequest::Unsubscribe {
                 internal_symbol,
+                exchange,
                 exchange_symbol,
                 requested_feed,
             } => {
-                info!(
-                    "Received unsubscribe request for {}.{:?}",
-                    internal_symbol, requested_feed
-                );
-                let subscription =
-                    Subscription::new(internal_symbol, exchange_symbol, requested_feed);
-                self.unsubscribe_ws_actor(subscription).await;
+                info!("📡 Received unsubscribe request for {internal_symbol}.{:?}", requested_feed);
+                let subscription = match exchange.as_str() {
+                    "Deribit" => ExchangeSubscription::Deribit(DeribitSubscription::new(
+                        internal_symbol,
+                        exchange_symbol,
+                        requested_feed,
+                    )),
+                    _ => {
+                        warn!("Unsupported exchange: {exchange}");
+                        return;
+                    }
+                };
+                if let Err(e) = self.unsubscribe_ws_actor(subscription).await {
+                    error!("❌ Unsubscribe request failed: {:?}", e);
+                }
             }
         }
     }
@@ -183,37 +219,44 @@ impl Orchestrator {
             RouterMessage::Heartbeat { actor_id } => {
                 if let Some(router_meta) = self.routers.get_mut(&actor_id) {
                     router_meta.last_heartbeat = Some(Instant::now());
-                    info!("Received heartbeat from actor: {actor_id}");
+                    debug!("Received heartbeat from actor: {actor_id}");
                 } else {
                     warn!("Received hearbeat from actor not in registry, actor_id: {actor_id}")
                 }
             }
+            RouterMessage::ConfirmSubscribe { ws_actor_id, exchange_symbol, feed_type} => {
+                self.confirm_subscribe(&ws_actor_id, &exchange_symbol, feed_type);
+            }
+            RouterMessage::ConfirmUnsubscribe { ws_actor_id, exchange_symbol, feed_type } => {
+                self.confirm_unsubscribe(&ws_actor_id, &exchange_symbol, feed_type);
+            }
+            
         }
     }
 
     async fn create_deribit_ws_actor(
         &mut self,
-        subscription: Subscription,
+        subscription: ExchangeSubscription,
     ) -> Result<(), OrchestratorError> {
+        // ✅ 1️⃣ Ensure we have a Router before proceeding.
         let (router_actor_id, router_sender) = match self.get_or_create_router().await {
             Ok(router) => router,
             Err(e) => {
-                error!("Failed to assign router for WebSocket actor: {:?}", e);
+                error!("❌ Failed to assign router for WebSocket actor: {:?}", e);
                 return Err(e);
             }
         };
 
-        info!("Attempting to create a new DeribitWebSocketActor");
+        debug!("🛠️ Creating new DeribitWebSocketActor for subscription: {}", subscription.stream_id());
 
-        // Channel for the Orchestrator to send messages to the WebSocket actor
+        // ✅ 2️⃣ Set up communication channels for the new WebSocket actor.
         let (command_sender, command_receiver) = mpsc::channel::<WebSocketCommand>(32);
-        // Channel that allows the WebSocket actor to send messages to the Orchestrator
         let ws_msg_sender = self.ws_message_sender.clone();
 
-        // Generate a unique actor ID
+        // ✅ 3️⃣ Generate a unique actor ID.
         let actor_id = generate_actor_id("DeribitWebSocketActor".to_string());
 
-        // Spawn the new actor
+        // ✅ 4️⃣ Spawn the WebSocket actor.
         let new_ws_actor = DeribitWebSocketActor::new(
             command_receiver,
             ws_msg_sender,
@@ -224,9 +267,12 @@ impl Orchestrator {
         tokio::spawn(async move {
             new_ws_actor.run().await;
         });
-        info!("Created a new DeribitWebSocketActor, assigned to Router ID: {}, waiting for heartbeat before sending subscribe command", router_actor_id);
+        info!(
+            "✅ Created DeribitWebSocketActor (ID: {}), assigned to Router ID: {}. Waiting for heartbeat...",
+            actor_id, router_actor_id
+        );
 
-        // Wait for a heartbeat from the new ws actor, with a timeout.
+        // ✅ 5️⃣ Wait for the WebSocket actor to confirm it is alive.
         let heartbeat_timeout = Duration::from_secs(CREATE_WEBSOCKET_ACTOR_TIMEOUT);
         let heartbeat_future = async {
             while let Some(msg) = self.from_ws.recv().await {
@@ -243,18 +289,54 @@ impl Orchestrator {
 
         match timeout(heartbeat_timeout, heartbeat_future).await {
             Ok(Ok(())) => {
-                info!("Received heartbeat from newly spawned actor: {}", actor_id);
+                debug!("✅ Heartbeat received from WebSocket actor: {}", actor_id);
             }
             Ok(Err(e)) => {
-                error!("Error during heartbeat wait: {}, actor_id: {}", e, actor_id);
+                error!("❌ Error during heartbeat wait: {}, actor_id: {}", e, actor_id);
                 return Err(e);
             }
             Err(_) => {
-                error!("Timeout waiting for newly spawned actor: {}", actor_id);
+                error!("❌ Timeout waiting for heartbeat from WebSocket actor: {}", actor_id);
                 return Err(OrchestratorError::WebSocketActorTimeout { actor_id });
             }
         }
 
+        // ✅ 6️⃣ Register the subscription with the Router before sending the Subscribe command.
+        match self.routers.get(&router_actor_id) {
+            Some(router) => {
+                if let Err(e) = router
+                    .router_command_sender
+                    .send(RouterCommand::Register {
+                        subscription: subscription.clone(),
+                    })
+                    .await
+                {
+                    error!(
+                        "❌ Failed to send RouterCommand::Register for {} to Router {}: {}",
+                        subscription.stream_id(),
+                        router.actor_id.clone(),
+                        e
+                    );
+                    return Err(OrchestratorError::RouterActorTimeout {
+                        actor_id: router.actor_id.clone(),
+                    });
+                }
+                debug!(
+                    "✅ Successfully registered {} with Router {}",
+                    subscription.stream_id(),
+                    router.actor_id
+                );
+            }
+            None => {
+                error!(
+                    "❌ No active router found while creating WebSocketActor. Subscription: {}",
+                    subscription.stream_id()
+                );
+                return Err(OrchestratorError::RouterActorMissing);
+            }
+        }
+        
+        // ✅ 7️⃣ Send the Subscribe command to the WebSocket actor.
         if let Err(e) = command_sender
             .send(WebSocketCommand::Subscribe(subscription.clone()))
             .await
@@ -266,18 +348,23 @@ impl Orchestrator {
             return Err(OrchestratorError::WebSocketActorTimeout { actor_id });
         }
 
-        // Register the new actor metadata
-        let mut subscribed_streams: HashSet<Subscription> = HashSet::new();
-        subscribed_streams.insert(subscription.clone());
+        // ✅ 8️⃣ Register the new WebSocket actor metadata.
+        let mut requested_streams: HashSet<ExchangeSubscription> = HashSet::new();
+        requested_streams.insert(subscription.clone());
 
         self.websockets.insert(
             actor_id.clone(),
-            WebSocketMetaData::new(
-                actor_id,
+            WebSocketMetadata::new(
+                actor_id.clone(),
                 command_sender,
                 router_actor_id,
-                subscribed_streams,
+                requested_streams,
             ),
+        );
+
+        info!(
+            "✅ WebSocket actor {} successfully created and registered for stream {}",
+            actor_id, subscription.stream_id()
         );
 
         Ok(())
@@ -286,7 +373,7 @@ impl Orchestrator {
     async fn get_or_create_router(
         &mut self,
     ) -> Result<(String, mpsc::Sender<ExchangeMessage>), OrchestratorError> {
-        info!("Checking for existing DeribitRouter actors");
+        debug!("Checking for existing DeribitRouter actors");
 
         if let Some((router_id, router_meta)) = self.routers.iter().next() {
             info!("Found existing DeribitRouter actor: {}", router_id);
@@ -302,14 +389,20 @@ impl Orchestrator {
         info!("Existing DeribitRouter actor not found, spawning one instead");
         let actor_id = generate_actor_id("DeribitRouterActor".to_string());
         let (router_sender, router_receiver) = mpsc::channel(32);
+        let (router_command_receiver, from_orch) = mpsc::channel(32);
         let to_orch = self.router_message_sender.clone();
 
-        let router_actor = DeribitRouterActor::new(actor_id.clone(), router_receiver, to_orch);
+        let router_actor = DeribitRouterActor::new(
+            actor_id.clone(),
+            router_receiver,
+            to_orch,
+            from_orch
+        );
 
         tokio::spawn(async move {
             router_actor.run().await;
         });
-        info!(
+        debug!(
             "Created a new DeribitRouter, actor_id: {}, waiting for heartbeat",
             actor_id
         );
@@ -333,9 +426,14 @@ impl Orchestrator {
 
         match heartbeat_result {
             Ok(Ok(())) => {
-                info!("Received heartbeat from newly spawned router: {}", actor_id);
-                let router_meta = RouterMetaData::new(actor_id.clone(), router_sender.clone());
+                debug!("Received heartbeat from newly spawned router: {}", actor_id);
+                let router_meta = RouterMetadata::new(
+                    actor_id.clone(),
+                    router_sender.clone(),
+                    router_command_receiver,
+                );
                 self.routers.insert(actor_id.clone(), router_meta);
+                info!("Created a new DeribitRouter, actor_id: {}", actor_id);
                 Ok((actor_id, router_sender))
             }
             Ok(Err(e)) => {
@@ -351,11 +449,13 @@ impl Orchestrator {
 
     async fn subscribe_ws_actor(
         &mut self,
-        subscription: Subscription,
+        subscription: ExchangeSubscription,
     ) -> Result<(), OrchestratorError> {
-        let stream_id = subscription.to_stream_id();
+        let stream_id = match &subscription {
+            ExchangeSubscription::Deribit(sub) => &sub.stream_id,
+        };
 
-        // Look for an actor that is already subscribed to this stream
+        // ✅ 1️⃣ Look for an existing WebSocket actor that is already subscribed to this stream.
         if let Some((actor_id, _)) = self
             .websockets
             .iter_mut()
@@ -365,16 +465,31 @@ impl Orchestrator {
             return Ok(());
         }
 
-        // Look for an actor with capacity that does not already subscribe to this stream
-        if let Some((actor_id, meta)) = self
+        // ✅ 2️⃣ Look for an existing WebSocket actor with capacity.
+        if let Some((actor_id, ws_meta)) = self
             .websockets
             .iter_mut()
-            .find(|(_id, meta)| meta.subscribed_streams.len() < MAX_STREAMS_PER_WS_ACTOR)
+            .find(|(_id, ws_meta)| ws_meta.subscribed_streams.len() < MAX_STREAMS_PER_WS_ACTOR)
         {
             info!("Assigning stream {stream_id} to existing WebSocket actor {actor_id}");
 
-            // Send the Subscribe command
-            if let Err(e) = meta
+            // ✅ 3️⃣ Fetch and register the subscription with the Router.
+            if let Some(router) = self.routers.get(&ws_meta.router_actor_id) {
+                if let Err(e) = router
+                    .router_command_sender
+                    .send(RouterCommand::Register { subscription: subscription.clone() })
+                    .await
+                {
+                    error!("Failed to send RouterCommand::Register for {} to Router {}: {}", stream_id, router.actor_id, e);
+                    return Err(OrchestratorError::RouterActorTimeout { actor_id: ws_meta.router_actor_id.clone() })
+                }
+            } else {
+                error!("No active router found for WebSocketActor: {actor_id} while subscribing {stream_id}, cannot register in router");
+                return Err(OrchestratorError::RouterActorMissing)
+            }
+
+            // ✅ 4️⃣ Send the Subscribe command to WebSocket actor.
+            if let Err(e) = ws_meta
                 .command_sender
                 .try_send(WebSocketCommand::Subscribe(subscription.clone()))
             {
@@ -385,16 +500,16 @@ impl Orchestrator {
                     actor_id: actor_id.clone(),
                 });
             } else {
-                meta.subscribed_streams.insert(subscription);
+                ws_meta.requested_streams.insert(subscription.clone());
                 info!("Successfully assigned stream {stream_id} to existing WebSocket actor {actor_id}");
             }
 
             return Ok(());
         }
-
+        
+        // ✅ 5️⃣ No existing WebSocket actor found—create a new one.
         info!("Stream capacity exhausted, spawning a new WebSocket actor for {stream_id}");
-
-        if let Err(e) = self.create_deribit_ws_actor(subscription).await {
+        if let Err(e) = self.create_deribit_ws_actor(subscription.clone()).await {
             error!("Failed to create WebSocket actor for {stream_id}: {e}");
             return Err(e);
         }
@@ -404,57 +519,148 @@ impl Orchestrator {
 
     async fn unsubscribe_ws_actor(
         &mut self,
-        subscription: Subscription,
+        subscription: ExchangeSubscription,
     ) -> Result<(), OrchestratorError> {
-        let stream_id = subscription.to_stream_id();
-        let stream_to_actor = construct_stream_to_actor_map(&self.websockets);
-
-        if let Some(actor_id) = stream_to_actor.get(&stream_id) {
-            if let Some(meta) = self.websockets.get_mut(actor_id) {
-                info!("Sending Unsubscribe command for: {stream_id}, to actor: {actor_id}");
-
-                if let Err(e) = meta
-                    .command_sender
-                    .send(WebSocketCommand::Unsubscribe(subscription.clone()))
-                    .await
-                {
-                    error!("Failed to send Unsubscribe WebSocketCommand for: {stream_id}, to actor: {actor_id}, {e}",);
-                    return Err(OrchestratorError::WebSocketActorTimeout {
-                        actor_id: actor_id.clone(),
-                    });
-                } else {
-                    meta.subscribed_streams.remove(&subscription);
-                    info!("WS actor registry metadata update for {actor_id}, {stream_id} removed from subscrbed_streams")
-                }
-            } else {
-                warn!("No actor metadata found for actor id: {}", actor_id);
-                return Err(OrchestratorError::WebSocketActorTimeout {
-                    actor_id: actor_id.clone(),
-                });
+        let stream_id = subscription.stream_id();
+        
+        let (actor_id, ws_meta) = match self
+            .websockets
+            .iter_mut()
+            .find(|(_, meta)| meta.subscribed_streams.contains(&subscription))
+        {
+            Some((id, meta)) => (id.clone(), meta),
+            None => {
+                warn!(
+                    "Unsubscribe request received for {} but no matching active subscription found in WebSocketActor registry.",
+                    stream_id
+                );
+                return Ok(());
             }
-        } else {
-            warn!(
-                "No WebSocketActor found handling subscription: {}",
-                stream_id
-            );
-        }
+        };
+
+        info!("Unsubscribing from {stream_id} on WebSocket actor: {actor_id}");
+
+        if let Err(e) = ws_meta
+            .command_sender
+            .send(WebSocketCommand::Unsubscribe(subscription.clone()))
+            .await {
+                error!(
+                    "Failed to send Unsubscribe request for {} to WebSocket actor: {}. Error: {}",
+                    stream_id, actor_id, e
+                );
+                return Err(OrchestratorError::WebSocketActorTimeout { actor_id: actor_id.clone() });
+            } else {
+                info!("Successfully unsubscribed from {stream_id} on WebSocket actor: {actor_id}");
+            }
+
         Ok(())
+    }
+
+    fn confirm_subscribe(
+        &mut self,
+        ws_actor_id: &str,
+        exchange_symbol: &str,
+        feed_type: RequestedFeed,
+    ) {
+        let Some(ws_meta) = self.websockets.get_mut(ws_actor_id) else {
+            warn!("Received Subscribe confirmation for unknown WebSocketActor: {ws_actor_id}");
+            return;
+        };
+
+        let requested_subscription = ws_meta
+            .requested_streams
+            .iter()
+            .find(|sub| sub.exchange_symbol() == exchange_symbol && sub.feed_type() == feed_type)
+            .cloned();
+
+        match requested_subscription {
+            Some(subscription) => {
+                ws_meta.requested_streams.remove(&subscription);
+                info!("Confirmed Subscribe for: {} from actor: {}", subscription.stream_id(), ws_actor_id);
+                ws_meta.subscribed_streams.insert(subscription);
+            }
+            None => {
+                warn!(
+                    "Subscribe confirmation received for {:?}: {} but no matching request was found in requested_stream for WebSocketActor: {}",
+                    feed_type, exchange_symbol, ws_actor_id
+                );
+            }
+        }
+    }
+
+    fn confirm_unsubscribe(
+        &mut self,
+        ws_actor_id: &str,
+        exchange_symbol: &str,
+        feed_type: RequestedFeed
+    ) {
+        // ✅ 1️⃣ Retrieve WebSocket metadata.
+        let Some(ws_meta) = self.websockets.get_mut(ws_actor_id) else {
+            warn!(" Received Unsubscribe confirmation for unknown WebSocketActor: {ws_actor_id}");
+            return;
+        };
+        
+        // ✅ 2️⃣ Look for the subscription in `subscribed_streams`
+        let stopped_subscription = ws_meta
+            .subscribed_streams
+            .iter()
+            .find(|sub| sub.exchange_symbol() == exchange_symbol && sub.feed_type() == feed_type)
+            .cloned();
+
+        match stopped_subscription {
+            Some(subscription) => {
+                // ✅ 3️⃣ Remove from `subscribed_streams`
+                if !ws_meta.subscribed_streams.remove(&subscription) {
+                    warn!(
+                        "⚠️ Tried to remove subscription {} from WebSocketMetadata for actor {}, but it wasn't found in subscribed_streams",
+                        subscription.stream_id(), ws_actor_id
+                    );
+                }
+                info!(
+                    "✅ Confirmed Unsubscribe for {} from actor: {}",
+                    subscription.stream_id(),
+                    ws_actor_id
+                );
+
+                // ✅ 4️⃣ Send `RouterCommand::Remove` to the Router to unregister it
+                if let Some(router) = self.routers.get(&ws_meta.router_actor_id) {
+                    if let Err(e) = router
+                        .router_command_sender
+                        .try_send(RouterCommand::Remove {
+                            subscription: subscription.clone() 
+                        })
+                    {
+                        error!(
+                            "❌ Failed to send RouterCommand::Remove for {} to Router {}: {}",
+                            subscription.stream_id(),
+                            router.actor_id,
+                            e
+                        );
+                    } else {
+                        info!(
+                            "🗑️ Successfully removed {} from Router {}",
+                            subscription.stream_id(),
+                            router.actor_id
+                        );
+                    }
+                } else {
+                    warn!(
+                        "⚠️ Router {} not found while handling Unsubscribe for {}",
+                        ws_meta.router_actor_id, subscription.stream_id()
+                    );
+                }
+            }
+            None => {
+                warn!(
+                    "⚠️ Unsubscribe confirmation received for {:?}: {} but no matching request was found in subscribed_streams for WebSocketActor: {}",
+                    feed_type, exchange_symbol, ws_actor_id
+                );
+            }
+        }
     }
 }
 
 fn generate_actor_id(actor_type: String) -> String {
     let id = ACTOR_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{actor_type}.{id}")
-}
-
-fn construct_stream_to_actor_map(
-    websocket_actors: &HashMap<String, WebSocketMetaData>,
-) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for (actor_id, meta) in websocket_actors.iter() {
-        for subscription in meta.subscribed_streams.iter() {
-            map.insert(subscription.to_stream_id(), actor_id.clone());
-        }
-    }
-    map
 }

@@ -89,7 +89,7 @@
 // New Framework (In Development!)
 
 use std::time::Duration;
-
+use dotenv::dotenv;
 use server::async_actors::common::RequestedFeed;
 use server::async_actors::messages::DummyRequest;
 use server::async_actors::orchestrator::Orchestrator;
@@ -101,6 +101,9 @@ use tracing_subscriber;
 
 #[tokio::main]
 async fn main() {
+    
+    dotenv().ok();
+
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("Failed to install default TLS provider");
@@ -126,6 +129,7 @@ async fn main() {
     dummy_grpc_sender
         .send(DummyRequest::Subscribe {
             internal_symbol: "Deribit.InvFut.BTC.USD".to_string(),
+            exchange: "Deribit".to_string(),
             exchange_symbol: "BTC-PERPETUAL".to_string(),
             requested_feed: RequestedFeed::OrderBook,
         })
@@ -139,6 +143,7 @@ async fn main() {
     dummy_grpc_sender
         .send(DummyRequest::Subscribe {
             internal_symbol: "Deribit.InvFut.ETH.USD".to_string(),
+            exchange: "Deribit".to_string(),
             exchange_symbol: "ETH-PERPETUAL".to_string(),
             requested_feed: RequestedFeed::OrderBook,
         })
@@ -151,6 +156,7 @@ async fn main() {
     dummy_grpc_sender
         .send(DummyRequest::Unsubscribe {
             internal_symbol: "Deribit.InvFut.BTC.USD".to_string(),
+            exchange: "Deribit".to_string(),
             exchange_symbol: "BTC-PERPETUAL".to_string(),
             requested_feed: RequestedFeed::OrderBook,
         })
@@ -163,6 +169,7 @@ async fn main() {
     dummy_grpc_sender
         .send(DummyRequest::Unsubscribe {
             internal_symbol: "Deribit.InvFut.ETH.USD".to_string(),
+            exchange: "Deribit".to_string(),
             exchange_symbol: "ETH-PERPETUAL".to_string(),
             requested_feed: RequestedFeed::OrderBook,
         })

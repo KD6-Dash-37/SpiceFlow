@@ -1,4 +1,5 @@
-use crate::async_actors::common::{RequestedFeed, Subscription, WebSocketActorError};
+use crate::async_actors::common::WebSocketActorError;
+use crate::async_actors::subscription::ExchangeSubscription;
 use crate::async_actors::messages::{ExchangeMessage, WebSocketCommand, WebSocketMessage};
 // Type alias for WebSocket stream
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -32,7 +33,7 @@ pub enum SubscriptionManagementAction {
 }
 
 impl SubscriptionManagementAction {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             SubscriptionManagementAction::Subscribe => "public/subscribe",
             SubscriptionManagementAction::Unsubscribe => "public/unsubscribe",
@@ -69,7 +70,7 @@ struct SubscriptionRequest<'a> {
 
 #[derive(Serialize)]
 struct SubscriptionRequestParams<'a> {
-    channels: &'a Vec<String>,
+    channels: &'a [String],
 }
 
 static STAY_ALIVE_MESSAGE: Lazy<Message> = Lazy::new(|| {
@@ -170,7 +171,7 @@ impl DeribitWebSocketActor {
                     _ = stay_alive_interval.tick() => {
                         match self.stay_alive().await {
                             Ok(()) => {
-                                info!("Stay-Alive successful");
+                                debug!("Stay-Alive successful"); // TODO demote to debug, later metric
                             },
                             Err(err) => {
                                 warn!("Stay-Alive failed: {:?}", err);
@@ -257,29 +258,38 @@ impl DeribitWebSocketActor {
         }
     }
 
-    async fn subscribe(&mut self, subscription: Subscription) {
-        info!("Subscribing to {}", subscription.internal_symbol);
-        let channels = create_channels(subscription);
-        if let Some(message) = prepare_subscription_management_message(
-            SubscriptionManagementAction::Subscribe,
-            &channels,
-        ) {
-            let _ = self.send_message_to_exchange(message).await;
-        } else {
-            error!("Failed to prepare subscription message");
+    async fn subscribe(&mut self, subscription: ExchangeSubscription) {
+        match subscription {
+            ExchangeSubscription::Deribit(sub) => {
+                info!("Subscribing to {}", sub.stream_id);
+                let channels = [sub.exchange_stream_id.clone()];
+                if let Some(message) =  prepare_subscription_management_message(
+                    SubscriptionManagementAction::Subscribe,
+                    &channels
+                ) {
+                    let _ = self.send_message_to_exchange(message).await;
+                } else {
+                    error!("Failed to prepare subscription message");
+                }
+            }
         }
     }
 
-    async fn unsubscribe(&mut self, subscription: Subscription) {
-        info!("Unsubscribing to {}", subscription.internal_symbol);
-        let channels = create_channels(subscription);
-        if let Some(message) = prepare_subscription_management_message(
-            SubscriptionManagementAction::Unsubscribe,
-            &channels,
-        ) {
-            let _ = self.send_message_to_exchange(message).await;
-        } else {
-            error!("Failed to prepare subscription message");
+    async fn unsubscribe(&mut self, subscription: ExchangeSubscription) {
+        match subscription {
+            ExchangeSubscription::Deribit(sub) => {
+                info!("Unsubscribing from {}", sub.stream_id);
+                let channels = vec![sub.exchange_stream_id.clone()];
+
+                if let Some(message) = prepare_subscription_management_message(
+                    SubscriptionManagementAction::Unsubscribe,
+                    &channels
+                ) {
+                    let _ = self.send_message_to_exchange(message).await;
+                } else {
+                    error!("Failed to preperate unsubscribe message");
+                }
+            }
         }
     }
 
@@ -287,11 +297,10 @@ impl DeribitWebSocketActor {
         &mut self,
         message: String,
     ) -> Result<(), WebSocketActorError> {
-        // Check if write is initialised
         if let Some(write) = &mut self.exchange_write {
-            match write.send(Message::Text(message.into())).await {
+            match write.send(Message::Text(message.clone().into())).await {
                 Ok(_) => {
-                    info!("Successfully sent message to exchange");
+                    debug!("Successfully sent message to exchange: {:?}", message);
                     Ok(())
                 }
                 Err(e) => {
@@ -306,11 +315,11 @@ impl DeribitWebSocketActor {
     }
 
     async fn stay_alive(&mut self) -> Result<(), WebSocketActorError> {
-        info!("Sending Stay-Alive message...");
+        debug!("Sending Stay-Alive message...");
         if let Some(write) = &mut self.exchange_write {
             match write.send(STAY_ALIVE_MESSAGE.clone()).await {
                 Ok(_) => {
-                    info!("Stay-Alive message sent successfully");
+                    debug!("Stay-Alive message sent to exchange");
                     Ok(())
                 }
                 Err(e) => {
@@ -337,7 +346,7 @@ impl DeribitWebSocketActor {
     }
 
     async fn send_close_frame(&mut self) -> Result<(), WebSocketActorError> {
-        info!("Sending close frame");
+        debug!("Sending close frame");
 
         if let Some(write) = &mut self.exchange_write {
             match timeout(
@@ -355,7 +364,7 @@ impl DeribitWebSocketActor {
                     Err(WebSocketActorError::Timeout)
                 }
                 Ok(Ok(())) => {
-                    info!("Successfully sent WebSocket close frame");
+                    debug!("Successfully sent WebSocket close frame");
                     Ok(())
                 }
             }
@@ -404,16 +413,10 @@ impl DeribitWebSocketActor {
     }
 }
 
-fn create_channels(subscription: Subscription) -> Vec<String> {
-    let channel = match subscription.requested_feed {
-        RequestedFeed::OrderBook => format!("book.{}.100ms", subscription.exchange_symbol),
-    };
-    vec![channel]
-}
 
 fn prepare_subscription_management_message(
     action: SubscriptionManagementAction,
-    channels: &Vec<String>,
+    channels: &[String],
 ) -> Option<String> {
     let message = SubscriptionRequest {
         jsonrpc: DEFAULT_JSONRPC,
