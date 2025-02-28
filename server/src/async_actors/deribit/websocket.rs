@@ -1,4 +1,4 @@
-use crate::async_actors::common::{RequestedFeed, Subscription, WebSocketActorError};
+use crate::async_actors::subscription::ExchangeSubscription;
 use crate::async_actors::messages::{ExchangeMessage, WebSocketCommand, WebSocketMessage};
 // Type alias for WebSocket stream
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -14,7 +14,7 @@ use tokio_tungstenite::{
     tungstenite::{protocol::Message, Error as TungsteniteError},
     MaybeTlsStream, WebSocketStream,
 };
-use tracing::{debug, error, info, warn, Instrument};
+use tracing::{debug, error, warn, Instrument};
 
 const WEBSOCKET_HEARTBEAT_INTERVAL: u64 = 5;
 const WEBSOCKET_STAY_ALIVE_INTERVAL: u64 = 5;
@@ -32,7 +32,7 @@ pub enum SubscriptionManagementAction {
 }
 
 impl SubscriptionManagementAction {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             SubscriptionManagementAction::Subscribe => "public/subscribe",
             SubscriptionManagementAction::Unsubscribe => "public/unsubscribe",
@@ -69,7 +69,7 @@ struct SubscriptionRequest<'a> {
 
 #[derive(Serialize)]
 struct SubscriptionRequestParams<'a> {
-    channels: &'a Vec<String>,
+    channels: &'a [String],
 }
 
 static STAY_ALIVE_MESSAGE: Lazy<Message> = Lazy::new(|| {
@@ -92,7 +92,15 @@ static UNSUBSCRIBE_ALL_MESSAGE: Lazy<Message> = Lazy::new(|| {
     Message::Text(json.to_string().into())
 });
 
-// #[derive(Debug)]
+#[derive(Debug)]
+pub enum WebSocketActorError {
+    SendError(String),
+    WriteNotInitialised,
+    Timeout,
+    ReceiveError(String),
+    ConnectionError(String),
+}
+
 pub struct DeribitWebSocketActor {
     command_receiver: mpsc::Receiver<WebSocketCommand>,
     to_orch: mpsc::Sender<WebSocketMessage>,
@@ -170,7 +178,7 @@ impl DeribitWebSocketActor {
                     _ = stay_alive_interval.tick() => {
                         match self.stay_alive().await {
                             Ok(()) => {
-                                info!("Stay-Alive successful");
+                                debug!("Stay-Alive successful"); // TODO demote to debug, later metric
                             },
                             Err(err) => {
                                 warn!("Stay-Alive failed: {:?}", err);
@@ -206,10 +214,10 @@ impl DeribitWebSocketActor {
     }
 
     async fn create_ws_stream(&mut self) -> Result<(), WebSocketActorError> {
-        info!("Attempting to create WebSocket stream to {DERIBIT_WS_BASE_URL}");
+        debug!("Attempting to create WebSocket stream to {DERIBIT_WS_BASE_URL}");
         match connect_with_retry(DERIBIT_WS_BASE_URL, None, 10).await {
             Ok(ws_stream) => {
-                info!("WS connection established to {DERIBIT_WS_BASE_URL}");
+                debug!("WS connection established to {DERIBIT_WS_BASE_URL}");
                 let (write_half, read_half) = ws_stream.split();
                 self.exchange_write = Some(write_half);
                 self.exchange_read = Some(read_half);
@@ -222,22 +230,27 @@ impl DeribitWebSocketActor {
         }
     }
 
-    async fn send_message_to_orch(&self, message: WebSocketMessage) {
+    async fn send_message_to_orch(&self, mut message: WebSocketMessage) {
         for _ in 0..ORCH_RETRY_ATTEMPTS {
-            match self.to_orch.try_send(message.clone()) {
+            match self.to_orch.try_send(message) {
                 Ok(_) => {
-                    info!("Successfully sent message to orchestrator",);
+                    debug!("✅ Successfully sent message to orchestrator");
+                    return;
                 }
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    warn!("Orchestrator channel is full, dropping message");
+                Err(tokio::sync::mpsc::error::TrySendError::Full(m)) => {
+                    warn!("Orchestrator channel is full, retrying...");
+                    message = m; 
                     sleep(Duration::from_millis(100)).await;
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    warn!("Orchestrator channel is closed, unable to send message");
+                    error!("❌ Orchestrator channel is closed, unable to send message");
+                    return;
                 }
             }
         }
-        error!("Failed to send message to orchestrator after {ORCH_RETRY_ATTEMPTS} retries, dropping message",);
+        error!(
+            "❌ Failed to send message to orchestrator after {ORCH_RETRY_ATTEMPTS} retries, dropping message",
+        );
     }
 
     async fn handle_command(&mut self, command: WebSocketCommand) -> bool {
@@ -257,29 +270,38 @@ impl DeribitWebSocketActor {
         }
     }
 
-    async fn subscribe(&mut self, subscription: Subscription) {
-        info!("Subscribing to {}", subscription.internal_symbol);
-        let channels = create_channels(subscription);
-        if let Some(message) = prepare_subscription_management_message(
-            SubscriptionManagementAction::Subscribe,
-            &channels,
-        ) {
-            let _ = self.send_message_to_exchange(message).await;
-        } else {
-            error!("Failed to prepare subscription message");
+    async fn subscribe(&mut self, subscription: ExchangeSubscription) {
+        match subscription {
+            ExchangeSubscription::Deribit(sub) => {
+                debug!("Subscribing to {}", sub.stream_id);
+                let channels = [sub.exchange_stream_id.clone()];
+                if let Some(message) =  prepare_subscription_management_message(
+                    SubscriptionManagementAction::Subscribe,
+                    &channels
+                ) {
+                    let _ = self.send_message_to_exchange(message).await;
+                } else {
+                    error!("Failed to prepare subscription message");
+                }
+            }
         }
     }
 
-    async fn unsubscribe(&mut self, subscription: Subscription) {
-        info!("Unsubscribing to {}", subscription.internal_symbol);
-        let channels = create_channels(subscription);
-        if let Some(message) = prepare_subscription_management_message(
-            SubscriptionManagementAction::Unsubscribe,
-            &channels,
-        ) {
-            let _ = self.send_message_to_exchange(message).await;
-        } else {
-            error!("Failed to prepare subscription message");
+    async fn unsubscribe(&mut self, subscription: ExchangeSubscription) {
+        match subscription {
+            ExchangeSubscription::Deribit(sub) => {
+                debug!("Unsubscribing from {}", sub.stream_id);
+                let channels = vec![sub.exchange_stream_id.clone()];
+
+                if let Some(message) = prepare_subscription_management_message(
+                    SubscriptionManagementAction::Unsubscribe,
+                    &channels
+                ) {
+                    let _ = self.send_message_to_exchange(message).await;
+                } else {
+                    error!("Failed to preperate unsubscribe message");
+                }
+            }
         }
     }
 
@@ -287,11 +309,10 @@ impl DeribitWebSocketActor {
         &mut self,
         message: String,
     ) -> Result<(), WebSocketActorError> {
-        // Check if write is initialised
         if let Some(write) = &mut self.exchange_write {
-            match write.send(Message::Text(message.into())).await {
+            match write.send(Message::Text(message.clone().into())).await {
                 Ok(_) => {
-                    info!("Successfully sent message to exchange");
+                    debug!("Successfully sent message to exchange: {:?}", message);
                     Ok(())
                 }
                 Err(e) => {
@@ -306,11 +327,11 @@ impl DeribitWebSocketActor {
     }
 
     async fn stay_alive(&mut self) -> Result<(), WebSocketActorError> {
-        info!("Sending Stay-Alive message...");
+        debug!("Sending Stay-Alive message...");
         if let Some(write) = &mut self.exchange_write {
             match write.send(STAY_ALIVE_MESSAGE.clone()).await {
                 Ok(_) => {
-                    info!("Stay-Alive message sent successfully");
+                    debug!("Stay-Alive message sent to exchange");
                     Ok(())
                 }
                 Err(e) => {
@@ -325,7 +346,7 @@ impl DeribitWebSocketActor {
     }
 
     async fn unsubscribe_all(&mut self) -> Result<(), WebSocketActorError> {
-        info!("Sending unsubscribe_all for public streams");
+        debug!("Sending unsubscribe_all for public streams");
         if let Some(write) = &mut self.exchange_write {
             write
                 .send(UNSUBSCRIBE_ALL_MESSAGE.clone())
@@ -337,7 +358,7 @@ impl DeribitWebSocketActor {
     }
 
     async fn send_close_frame(&mut self) -> Result<(), WebSocketActorError> {
-        info!("Sending close frame");
+        debug!("Sending close frame");
 
         if let Some(write) = &mut self.exchange_write {
             match timeout(
@@ -355,7 +376,7 @@ impl DeribitWebSocketActor {
                     Err(WebSocketActorError::Timeout)
                 }
                 Ok(Ok(())) => {
-                    info!("Successfully sent WebSocket close frame");
+                    debug!("Successfully sent WebSocket close frame");
                     Ok(())
                 }
             }
@@ -366,28 +387,28 @@ impl DeribitWebSocketActor {
     }
 
     fn drop_exchange_streams(&mut self) {
-        info!("Dropping exchange streams");
+        debug!("Dropping exchange streams");
         if self.exchange_write.take().is_none() {
             warn!("Exchange_write stream was already None");
         } else {
-            info!("Successfully dropped exchange_write");
+            debug!("Successfully dropped exchange_write");
         }
 
         if self.exchange_read.take().is_none() {
             warn!("Exchange_read stream was already None");
         } else {
-            info!("Successfully dropped exchange_read");
+            debug!("Successfully dropped exchange_read");
         }
     }
 
     async fn tear_down(&mut self) {
-        info!("{}: Initiating teardown sequence", self.actor_id);
+        debug!("{}: Initiating teardown sequence", self.actor_id);
 
         // Attempt to unsubscribe to all subscriptions, regardless if you there are any active ones
         if let Err(err) = self.unsubscribe_all().await {
             error!("Failed to send unsubscribe_all message: {:?}", err);
         } else {
-            info!("Successfully sent unsubscribe_all message");
+            debug!("Successfully sent unsubscribe_all message");
         }
 
         let _ = self.send_close_frame().await;
@@ -400,20 +421,14 @@ impl DeribitWebSocketActor {
         })
         .await;
 
-        info!("Teardown complete");
+        debug!("Teardown complete");
     }
 }
 
-fn create_channels(subscription: Subscription) -> Vec<String> {
-    let channel = match subscription.requested_feed {
-        RequestedFeed::OrderBook => format!("book.{}.100ms", subscription.exchange_symbol),
-    };
-    vec![channel]
-}
 
 fn prepare_subscription_management_message(
     action: SubscriptionManagementAction,
-    channels: &Vec<String>,
+    channels: &[String],
 ) -> Option<String> {
     let message = SubscriptionRequest {
         jsonrpc: DEFAULT_JSONRPC,
