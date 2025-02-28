@@ -1,6 +1,6 @@
 use tokio_tungstenite::tungstenite::protocol::Message;
+use crate::async_actors::orchestrator::common::RequestedFeed;
 
-use crate::async_actors::common::RequestedFeed;
 use crate::async_actors::subscription::ExchangeSubscription;
 use std::fmt;
 

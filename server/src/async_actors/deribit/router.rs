@@ -1,10 +1,10 @@
-use crate::async_actors::common::RequestedFeed;
+use crate::async_actors::orchestrator::common::RequestedFeed;
 use crate::async_actors::messages::{ExchangeMessage, RouterMessage, RouterCommand, MarketData};
 use crate::async_actors::deribit::websocket::SubscriptionManagementAction;
 use crate::async_actors::subscription::{ExchangeSubscription, SubscriptionInfo};
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
-use tracing::{debug, error, info, Instrument, warn};
+use tracing::{debug, error, Instrument, warn};
 use thiserror::Error;
 use tungstenite::Message;
 use std::collections::HashMap;
@@ -95,7 +95,7 @@ impl DeribitRouterActor {
                     }
                     
                     Some(exchange_message) = self.router_receiver.recv() => {
-                        match self.parse_message(&exchange_message).await {
+                        match self.parse_message(&exchange_message) {
                             Ok(parsed_message) => {
                                 match parsed_message {
                                     ParsedMessage::MarketData { exchange_stream_id, data } => {
@@ -118,7 +118,7 @@ impl DeribitRouterActor {
                                         ).await;
                                     }
                                     ParsedMessage::UnsubscribeAll { result } => {
-                                        info!("✅ Received UnsubscribeAll confirmation: {}", result); // TODO implement forward handling
+                                        debug!("✅ Received UnsubscribeAll confirmation: {}", result); // TODO implement forward handling
                                     }
                                     ParsedMessage::Test { version } => {
                                         debug!("✅ Test response confirmed, Deribit API version: {}", version); // TODO what should do here, if anything?
@@ -160,7 +160,7 @@ impl DeribitRouterActor {
         }
     }
 
-    async fn parse_message(
+    fn parse_message(
         &mut self,
         exchange_message: &ExchangeMessage
     ) -> ParseMessageResult<ParsedMessage> {
@@ -277,14 +277,14 @@ impl DeribitRouterActor {
                         exchange_stream_id,
                         subscription
                     );
-                    info!("Registered subscription: {}", stream_id);
+                    debug!("Registered subscription: {}", stream_id);
                 }
                 
             }
             RouterCommand::Remove { subscription } => {
                 let exchange_stream_id = subscription.exchange_stream_id().to_string();
                 if self.registered_streams.remove(&exchange_stream_id).is_some() {
-                    info!("Removed subscription: {}", subscription.stream_id());
+                    debug!("Removed subscription: {}", subscription.stream_id());
                 } else {
                     warn!("Tried to remove non-existent subscription: {}", subscription.stream_id());
                 }
@@ -306,9 +306,7 @@ impl DeribitRouterActor {
         }
 
       for raw_channel in channels {
-        info!("📡 Forwarding subscription confirmation for: {} (Action: {})", raw_channel, action.as_str());
-
-        info!("Forwarding subscription management confirmation for: {raw_channel} to Orchestrator from: {}", action.as_str());
+        debug!("Forwarding subscription management confirmation for: {raw_channel} to Orchestrator from: {}", action.as_str());
         match extract_feed_and_symbol(&raw_channel) {
             Ok((feed_type, exchange_symbol)) => {
                 let message = match action {

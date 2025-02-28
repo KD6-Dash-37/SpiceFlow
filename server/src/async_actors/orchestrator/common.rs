@@ -1,3 +1,6 @@
+// async_actors/orchestrator/common.rs
+
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestedFeed {
     OrderBook,
@@ -18,11 +21,4 @@ impl RequestedFeed {
     }
 }
 
-#[derive(Debug)]
-pub enum WebSocketActorError {
-    SendError(String),
-    WriteNotInitialised,
-    Timeout,
-    ReceiveError(String),
-    ConnectionError(String),
-}
+

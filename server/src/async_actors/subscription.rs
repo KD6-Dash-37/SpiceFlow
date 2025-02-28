@@ -1,4 +1,4 @@
-use crate::async_actors::common::RequestedFeed;
+use crate::async_actors::orchestrator::common::RequestedFeed;
 use std::hash::{Hash, Hasher};
 
 pub trait SubscriptionInfo {
