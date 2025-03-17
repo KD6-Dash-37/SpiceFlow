@@ -1,6 +1,5 @@
 // async_actors/orchestrator/common.rs
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestedFeed {
     OrderBook,
@@ -20,5 +19,3 @@ impl RequestedFeed {
         }
     }
 }
-
-

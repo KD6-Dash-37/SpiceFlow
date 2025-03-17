@@ -1,5 +1,5 @@
-use crate::async_actors::subscription::ExchangeSubscription;
 use crate::async_actors::messages::{ExchangeMessage, WebSocketCommand, WebSocketMessage};
+use crate::async_actors::subscription::ExchangeSubscription;
 // Type alias for WebSocket stream
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -239,7 +239,7 @@ impl DeribitWebSocketActor {
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(m)) => {
                     warn!("Orchestrator channel is full, retrying...");
-                    message = m; 
+                    message = m;
                     sleep(Duration::from_millis(100)).await;
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
@@ -263,6 +263,11 @@ impl DeribitWebSocketActor {
                 self.unsubscribe(subscription).await;
                 true
             }
+            WebSocketCommand::Resubscribe(subscription) => {
+                self.unsubscribe(subscription.clone()).await;
+                self.subscribe(subscription).await;
+                true
+            }
             WebSocketCommand::Teardown => {
                 self.tear_down().await;
                 false
@@ -275,9 +280,9 @@ impl DeribitWebSocketActor {
             ExchangeSubscription::Deribit(sub) => {
                 debug!("Subscribing to {}", sub.stream_id);
                 let channels = [sub.exchange_stream_id.clone()];
-                if let Some(message) =  prepare_subscription_management_message(
+                if let Some(message) = prepare_subscription_management_message(
                     SubscriptionManagementAction::Subscribe,
-                    &channels
+                    &channels,
                 ) {
                     let _ = self.send_message_to_exchange(message).await;
                 } else {
@@ -295,7 +300,7 @@ impl DeribitWebSocketActor {
 
                 if let Some(message) = prepare_subscription_management_message(
                     SubscriptionManagementAction::Unsubscribe,
-                    &channels
+                    &channels,
                 ) {
                     let _ = self.send_message_to_exchange(message).await;
                 } else {
@@ -424,7 +429,6 @@ impl DeribitWebSocketActor {
         debug!("Teardown complete");
     }
 }
-
 
 fn prepare_subscription_management_message(
     action: SubscriptionManagementAction,
