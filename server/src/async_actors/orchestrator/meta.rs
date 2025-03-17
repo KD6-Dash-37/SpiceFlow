@@ -1,32 +1,11 @@
-use crate::async_actors::messages::{ExchangeMessage,RouterCommand,WebSocketCommand};
-use std::collections::HashSet;
+use crate::async_actors::messages::{
+    Exchange, ExchangeMessage, OrderBookCommand, RawMarketData, RouterCommand, WebSocketCommand,
+};
 use crate::async_actors::subscription::ExchangeSubscription;
+use std::collections::HashSet;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use std::time::Instant;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Exchange {
-    Deribit,
-}
-
-impl std::str::FromStr for Exchange {
-    type Err = &'static str;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "Deribit" => Ok(Exchange::Deribit),
-            _ => Err("Unknown or unsupported exchange"),
-        }
-    }
-}
-
-impl Exchange {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Exchange::Deribit => "Deribit",
-        }
-    }
-}
 
 pub struct WebSocketMetadata {
     pub actor_id: String,
@@ -63,7 +42,6 @@ impl WebSocketMetadata {
     }
 }
 
-
 pub struct RouterMetadata {
     pub actor_id: String,
     pub exchange: Exchange,
@@ -80,7 +58,7 @@ impl RouterMetadata {
         exchange: Exchange,
         router_sender: mpsc::Sender<ExchangeMessage>,
         router_command_sender: mpsc::Sender<RouterCommand>,
-        join_handle: JoinHandle<()>
+        join_handle: JoinHandle<()>,
     ) -> Self {
         Self {
             actor_id,
@@ -89,7 +67,39 @@ impl RouterMetadata {
             router_command_sender,
             subscribed_streams: HashSet::new(),
             last_heartbeat: None,
-            join_handle
+            join_handle,
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.last_heartbeat.is_some()
+    }
+}
+
+pub struct OrderBookMetadata {
+    pub actor_id: String,
+    pub subscription: ExchangeSubscription,
+    pub last_heartbeat: Option<Instant>,
+    pub orderbook_command_sender: mpsc::Sender<OrderBookCommand>,
+    pub raw_market_data_sender: mpsc::Sender<RawMarketData>,
+    pub join_handle: JoinHandle<()>,
+}
+
+impl OrderBookMetadata {
+    pub fn new(
+        actor_id: String,
+        subscription: ExchangeSubscription,
+        orderbook_command_sender: mpsc::Sender<OrderBookCommand>,
+        raw_market_data_sender: mpsc::Sender<RawMarketData>,
+        join_handle: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            actor_id,
+            subscription,
+            orderbook_command_sender,
+            last_heartbeat: None,
+            raw_market_data_sender,
+            join_handle,
         }
     }
 

@@ -1,3 +1,4 @@
+use crate::async_actors::messages::Exchange;
 use crate::async_actors::orchestrator::common::RequestedFeed;
 use std::hash::{Hash, Hasher};
 
@@ -5,11 +6,12 @@ pub trait SubscriptionInfo {
     fn exchange_symbol(&self) -> &str;
     fn exchange_stream_id(&self) -> &str;
     fn feed_type(&self) -> RequestedFeed;
+    fn exchange(&self) -> Exchange;
 }
 
 #[derive(Debug, Clone)]
 pub enum ExchangeSubscription {
-    Deribit(DeribitSubscription)
+    Deribit(DeribitSubscription),
 }
 
 impl PartialEq for ExchangeSubscription {
@@ -50,8 +52,12 @@ impl SubscriptionInfo for ExchangeSubscription {
             ExchangeSubscription::Deribit(sub) => sub.exchange_stream_id(),
         }
     }
+    fn exchange(&self) -> Exchange {
+        match self {
+            ExchangeSubscription::Deribit(sub) => sub.exchange(),
+        }
+    }
 }
-
 
 impl SubscriptionInfo for DeribitSubscription {
     fn exchange_symbol(&self) -> &str {
@@ -63,18 +69,19 @@ impl SubscriptionInfo for DeribitSubscription {
     fn exchange_stream_id(&self) -> &str {
         &self.exchange_stream_id
     }
+    fn exchange(&self) -> Exchange {
+        self.exchange
+    }
 }
 
-
-
-
-#[derive(Debug, Clone)] 
+#[derive(Debug, Clone)]
 pub struct DeribitSubscription {
     pub internal_symbol: String,
     pub exchange_symbol: String,
     pub requested_feed: RequestedFeed,
     pub stream_id: String,
     pub exchange_stream_id: String,
+    pub exchange: Exchange,
 }
 
 impl PartialEq for DeribitSubscription {
@@ -91,13 +98,12 @@ impl Hash for DeribitSubscription {
     }
 }
 
-
-
 impl DeribitSubscription {
     pub fn new(
         internal_symbol: String,
         exchange_symbol: String,
         requested_feed: RequestedFeed,
+        exchange: Exchange,
     ) -> Self {
         let stream_id = format!("{}.{}", internal_symbol, requested_feed.as_str());
         let exchange_stream_id = match requested_feed {
@@ -110,7 +116,8 @@ impl DeribitSubscription {
             exchange_symbol,
             requested_feed,
             stream_id,
-            exchange_stream_id
+            exchange_stream_id,
+            exchange,
         }
     }
 }
