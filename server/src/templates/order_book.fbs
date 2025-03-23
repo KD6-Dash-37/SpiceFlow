@@ -1,0 +1,13 @@
+table PriceLevel {
+    price: double;
+    size: double;
+}
+
+table OrderBook {
+    topic: string;
+    bids: [PriceLevel];
+    asks: [PriceLevel];
+    exch_timestamp: ulong;
+}
+
+root_type OrderBook;

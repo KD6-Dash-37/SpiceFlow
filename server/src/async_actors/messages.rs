@@ -1,9 +1,9 @@
 use crate::async_actors::orchestrator::common::RequestedFeed;
 use crate::async_actors::subscription::ExchangeSubscription;
+use ordered_float::OrderedFloat;
 use std::fmt;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::protocol::Message;
-use ordered_float::OrderedFloat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Exchange {
@@ -127,11 +127,30 @@ pub struct RawMarketData {
 pub enum OrderBookMessage {
     Heartbeat { actor_id: String },
     Shutdown { actor_id: String },
-    Resubscribe {subscription: ExchangeSubscription},
+    Resubscribe { subscription: ExchangeSubscription },
 }
 
 pub enum OrderBookCommand {
     Shutdown,
+}
+
+pub trait Topic {
+    fn topic(&self) -> &str;
+}
+
+#[derive(Debug)]
+pub enum ProcessedMarketData {
+    OrderBook(ProcessedOrderBookData),
+}
+
+impl Topic for ProcessedMarketData {
+    fn topic(&self) -> &str {
+        match self {
+            ProcessedMarketData::OrderBook(ob) => {
+                ob.topic()
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -139,5 +158,19 @@ pub struct ProcessedOrderBookData {
     pub stream_id: String,
     pub exchange_timestamp: u64,
     pub bids: Vec<(OrderedFloat<f64>, f64)>,
-    pub asks: Vec<(OrderedFloat<f64>, f64)>, 
+    pub asks: Vec<(OrderedFloat<f64>, f64)>,
+}
+
+impl Topic for ProcessedOrderBookData {
+    fn topic(&self) -> &str {
+        &self.stream_id
+    }
+}
+
+pub enum BroadcastActorMessage {
+    Heartbeat { actor_id: String },
+}
+
+pub enum BroadcastActorCommand {
+    Shutdown,
 }
