@@ -1,8 +1,5 @@
 use crate::async_actors::messages::{
-    OrderBookCommand,
-    OrderBookMessage,
-    RawMarketData,
-    ProcessedOrderBookData
+    OrderBookCommand, OrderBookMessage, ProcessedMarketData, ProcessedOrderBookData, RawMarketData
 };
 use crate::async_actors::subscription::ExchangeSubscription;
 use ordered_float::OrderedFloat;
@@ -29,7 +26,9 @@ pub enum OrderBookActorError {
     #[error("Received orderbook change while waiting for fresh snapshot")]
     UnwantedOrderBookChange,
     #[error("Message send failure")]
-    OrchestratorTimeOut
+    OrchestratorTimeout,
+    #[error("Message send failure")]
+    BroadcastActorTimeout,
 }
 
 type OrderBookResult<T> = Result<T, OrderBookActorError>;
@@ -109,6 +108,7 @@ pub struct DeribitOrderBookActor {
     to_orch: mpsc::Sender<OrderBookMessage>,
     from_orch: mpsc::Receiver<OrderBookCommand>,
     raw_market_data: mpsc::Receiver<RawMarketData>,
+    market_data_sender: mpsc::Sender<ProcessedMarketData>,
     waiting_for_snapshot: bool,
     current_change_id: Option<u64>,
     exchange_timestamp: Option<u64>,
@@ -123,6 +123,7 @@ impl DeribitOrderBookActor {
         to_orch: mpsc::Sender<OrderBookMessage>,
         from_orch: mpsc::Receiver<OrderBookCommand>,
         raw_market_data: mpsc::Receiver<RawMarketData>,
+        market_data_sender: mpsc::Sender<ProcessedMarketData>
     ) -> Self {
         Self {
             actor_id,
@@ -130,6 +131,7 @@ impl DeribitOrderBookActor {
             to_orch,
             from_orch,
             raw_market_data,
+            market_data_sender,
             waiting_for_snapshot: true,
             current_change_id: None,
             exchange_timestamp: None,
@@ -169,9 +171,9 @@ impl DeribitOrderBookActor {
                     Some(raw) = self.raw_market_data.recv() => {
                         match self.process_market_data(raw).await {
                             ProcessMessageResult::Ok => {
-                                let _data = self.construct_processed_data();
-                                info!("{:?}", _data);
-
+                                if let Err(e) = self.send_processed_data().await {
+                                    error!("{}", e)
+                                }
                             },
                             ProcessMessageResult::ErrRequiresResub(e) => {
                                 error!("{:?}", e);
@@ -201,11 +203,11 @@ impl DeribitOrderBookActor {
             .await
         {
             Ok(_) => {
-                info!(actor_id = %self.actor_id, "Sent hearbeat");
+                info!("Sent hearbeat");
                 true
             }
             Err(e) => {
-                error!(actor_id = %self.actor_id, "Failed to send heartbeat to Orchestrator: {e}");
+                error!("Failed to send heartbeat to Orchestrator: {e}");
                 false
             }
         }
@@ -258,11 +260,8 @@ impl DeribitOrderBookActor {
     }
 
     fn process_orderbook_change(&mut self, data: RawOrderBookData) -> ProcessMessageResult {
-        
         if self.waiting_for_snapshot == true {
-            return ProcessMessageResult::ErrNoResub(
-                OrderBookActorError::UnwantedOrderBookChange
-            );
+            return ProcessMessageResult::ErrNoResub(OrderBookActorError::UnwantedOrderBookChange);
         }
 
         if let Err(err) = self.check_prev_change_id(&data) {
@@ -315,15 +314,18 @@ impl DeribitOrderBookActor {
         Ok(())
     }
 
-    async fn request_resubscribe(&self) -> Result<(), OrderBookActorError> {
+    async fn request_resubscribe(&mut self) -> Result<(), OrderBookActorError> {
         self.to_orch
-            .send(OrderBookMessage::Resubscribe { subscription: self.subscription.clone() })
+            .send(OrderBookMessage::Resubscribe {
+                subscription: self.subscription.clone(),
+            })
             .await
-            .map_err(|_| OrderBookActorError::OrchestratorTimeOut)?;
+            .map_err(|_| OrderBookActorError::OrchestratorTimeout)?;
+        self.waiting_for_snapshot = true;
         Ok(())
     }
 
-    fn construct_processed_data(&self) -> ProcessedOrderBookData {
+    async fn send_processed_data(&mut self) -> Result<(), OrderBookActorError> {
         let bids: Vec<(OrderedFloat<f64>, f64)> = self
             .bids
             .iter()
@@ -337,11 +339,17 @@ impl DeribitOrderBookActor {
             .map(|(price, quantity)| (*price, *quantity))
             .collect();
 
-        ProcessedOrderBookData {
+        let data = ProcessedMarketData::OrderBook(ProcessedOrderBookData {
             stream_id: self.subscription.stream_id().to_string(),
             exchange_timestamp: self.exchange_timestamp.unwrap_or(0),
             bids,
-            asks
-        }
+            asks,
+        });
+        
+        self.market_data_sender
+            .send(data)
+            .await
+            .map_err(|_| OrderBookActorError::BroadcastActorTimeout)
+        
     }
 }

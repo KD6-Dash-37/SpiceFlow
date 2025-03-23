@@ -14,7 +14,7 @@ use tokio_tungstenite::{
     tungstenite::{protocol::Message, Error as TungsteniteError},
     MaybeTlsStream, WebSocketStream,
 };
-use tracing::{debug, error, warn, Instrument};
+use tracing::{debug, error, warn, info, Instrument};
 
 const WEBSOCKET_HEARTBEAT_INTERVAL: u64 = 5;
 const WEBSOCKET_STAY_ALIVE_INTERVAL: u64 = 5;
@@ -278,7 +278,7 @@ impl DeribitWebSocketActor {
     async fn subscribe(&mut self, subscription: ExchangeSubscription) {
         match subscription {
             ExchangeSubscription::Deribit(sub) => {
-                debug!("Subscribing to {}", sub.stream_id);
+                info!("Subscribing to {}", sub.stream_id);
                 let channels = [sub.exchange_stream_id.clone()];
                 if let Some(message) = prepare_subscription_management_message(
                     SubscriptionManagementAction::Subscribe,

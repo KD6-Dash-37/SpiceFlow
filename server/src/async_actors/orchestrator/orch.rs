@@ -1,22 +1,29 @@
-use super::actions::{PendingAction, TaskStatus};
 use super::common::RequestedFeed;
-use super::meta::{OrderBookMetadata, RouterMetadata, WebSocketMetadata};
+use super::meta::{BroadcastActorMetadata, OrderBookMetadata, RouterMetadata, WebSocketMetadata};
+use crate::async_actors::broadcast::BroadcastActor;
 use crate::async_actors::deribit::orderbook::DeribitOrderBookActor;
 use crate::async_actors::deribit::router::DeribitRouterActor;
 use crate::async_actors::deribit::websocket::DeribitWebSocketActor;
 use crate::async_actors::messages::{
-    DummyRequest, Exchange, OrderBookCommand, OrderBookMessage, RawMarketData, RouterCommand,
-    RouterMessage, WebSocketCommand, WebSocketMessage,
+    BroadcastActorCommand, BroadcastActorMessage, DummyRequest, Exchange, OrderBookCommand,
+    OrderBookMessage, ProcessedMarketData, RawMarketData, RouterCommand, RouterMessage,
+    WebSocketCommand, WebSocketMessage,
 };
 use crate::async_actors::subscription::SubscriptionInfo;
 use crate::async_actors::subscription::{DeribitSubscription, ExchangeSubscription};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+use std::u16;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn, Instrument};
+use crate::async_actors::orchestrator::tasks::{
+    TaskOutcome,
+    Workflow,
+    WorkflowKind,
+};
 // TODO used for actor ID's make more robust later
 static ACTOR_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -25,6 +32,8 @@ const WS_MESSAGE_BUFFER_SIZE: usize = 32;
 const ROUTER_MESSAGE_BUFFER_SIZE: usize = 32;
 const OB_MESSAGE_BUFFER_SIZE: usize = 32;
 const OB_MD_RAW_BUFFER_SIZE: usize = 32;
+const BROADCAST_MESSAGE_BUFFER_SIZE: usize = 32;
+const ZERO_MQ_PORT: u16 = 5556;
 
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
@@ -37,6 +46,8 @@ pub enum OrchestratorError {
     WebSocketActorTimeout { actor_id: String },
     #[error("❌ OrderBookActor {actor_id} timed out")]
     OrderBookActorTimeout { actor_id: String },
+    #[error("❌ BroastcastActor {actor_id} timed out")]
+    BroastcastActorTimeout { actor_id: String },
 
     // -------------------------------------------------------
     // Channel errors
@@ -58,6 +69,8 @@ pub enum OrchestratorError {
     WebSocketActorMissing,
     #[error("❌ OrderBookActor not found")]
     OrderBookActorMissing,
+    #[error("❌ BroadcastActor not found")]
+    BroadcastActorMissing,
 
     // -------------------------------------------------------
     // Cannot find actor by ID
@@ -68,6 +81,8 @@ pub enum OrchestratorError {
     RouterNotFound { actor_id: String },
     #[error("❌ OrderBookActor: {actor_id} not found")]
     OrderBookNotFound { actor_id: String },
+    #[error("❌ BroastcastActor: {actor_id} not found")]
+    BroastcastActorNotFound { actor_id: String },
 
     // -------------------------------------------------------
     // Subscription errors
@@ -82,9 +97,10 @@ pub enum OrchestratorError {
 }
 
 pub struct Orchestrator {
-    websockets: HashMap<String, WebSocketMetadata>,
-    routers: HashMap<String, RouterMetadata>,
-    orderbooks: HashMap<String, OrderBookMetadata>,
+    pub websockets: HashMap<String, WebSocketMetadata>,
+    pub routers: HashMap<String, RouterMetadata>,
+    pub orderbooks: HashMap<String, OrderBookMetadata>,
+    pub broadcast_actors: HashMap<String, BroadcastActorMetadata>,
     dummy_grpc_receiver: mpsc::Receiver<DummyRequest>,
     from_ws: mpsc::Receiver<WebSocketMessage>,
     ws_message_sender: mpsc::Sender<WebSocketMessage>,
@@ -92,7 +108,9 @@ pub struct Orchestrator {
     router_message_sender: mpsc::Sender<RouterMessage>,
     from_orderbook: mpsc::Receiver<OrderBookMessage>,
     orderbook_message_sender: mpsc::Sender<OrderBookMessage>,
-    pending_actions: VecDeque<PendingAction>,
+    from_broadcast_actor: mpsc::Receiver<BroadcastActorMessage>,
+    broadcast_actor_message_sender: mpsc::Sender<BroadcastActorMessage>,
+    workflows: VecDeque<Workflow>,
 }
 
 impl Orchestrator {
@@ -100,10 +118,13 @@ impl Orchestrator {
         let (ws_message_sender, from_ws) = mpsc::channel(WS_MESSAGE_BUFFER_SIZE);
         let (router_message_sender, from_router) = mpsc::channel(ROUTER_MESSAGE_BUFFER_SIZE);
         let (orderbook_message_sender, from_orderbook) = mpsc::channel(OB_MESSAGE_BUFFER_SIZE);
+        let (broadcast_actor_message_sender, from_broadcast_actor) =
+            mpsc::channel(BROADCAST_MESSAGE_BUFFER_SIZE);
         Self {
             websockets: HashMap::new(),
             routers: HashMap::new(),
             orderbooks: HashMap::new(),
+            broadcast_actors: HashMap::new(),
             dummy_grpc_receiver,
             from_ws,
             ws_message_sender,
@@ -111,7 +132,9 @@ impl Orchestrator {
             router_message_sender,
             from_orderbook,
             orderbook_message_sender,
-            pending_actions: VecDeque::new(),
+            from_broadcast_actor,
+            broadcast_actor_message_sender,
+            workflows: VecDeque::new(),
         }
     }
 
@@ -134,8 +157,11 @@ impl Orchestrator {
                     Some(orderbook_message) = self.from_orderbook.recv() => {
                         self.handle_orderbook_message(orderbook_message).await;
                     }
+                    Some(broadcast_actor_message) = self.from_broadcast_actor.recv() => {
+                        self.handle_broadcast_actor_message(broadcast_actor_message);
+                    }
                     _ = task_check_interval.tick() => {
-                        self.process_pending_actions().await;
+                        self.tick_workflows().await;
                     }
                     else => break,
                 }
@@ -165,16 +191,14 @@ impl Orchestrator {
                         Exchange::Deribit,
                     )),
                 };
-                let subscribe_action = PendingAction::Subscribe {
-                    subscription: subscription.clone(),
-                    nested_create_orderbook_actor: None,
-                    orderbook_actor_id: None,
-                    nested_subscribe_router: None,
-                    router_actor_id: None,
-                    nested_subscribe_websocket: None,
-                };
-                self.pending_actions.push_back(subscribe_action);
-            }
+                self.workflows.push_back(
+                    Workflow::new(
+                        subscription,
+                        WorkflowKind::Subscribe,
+                    )
+                );
+                info!("🧵 Enqueued WorkflowKind::Subscribe");
+                }
 
             DummyRequest::Unsubscribe {
                 internal_symbol,
@@ -194,15 +218,13 @@ impl Orchestrator {
                         Exchange::Deribit,
                     )),
                 };
-                let unsubscribe_action = PendingAction::Unsubscribe {
-                    subscription: subscription.clone(),
-                    nested_unsubscribe_ws_actor: None,
-                    nested_unsubscribe_router: None,
-                    nested_teardown_orderbook: None,
-                    ws_unsubscribe_confirmed: false,
-                    router_unsubscribe_confirmed: false,
-                };
-                self.pending_actions.push_back(unsubscribe_action);
+                self.workflows.push_back(
+                    Workflow::new(
+                        subscription,
+                        WorkflowKind::Unsubscribe,
+                    )
+                );
+                info!("🧵 Enqueued WorkflowKind::Unsubscribe");
             }
         }
     }
@@ -238,7 +260,7 @@ impl Orchestrator {
             RouterMessage::Heartbeat { actor_id } => {
                 if let Some(router_meta) = self.routers.get_mut(&actor_id) {
                     router_meta.last_heartbeat = Some(Instant::now());
-                    debug!("Received heartbeat from actor: {actor_id}");
+                    info!("Received heartbeat from actor: {actor_id}");
                 } else {
                     warn!("Received hearbeat from actor not in registry, actor_id: {actor_id}");
                 }
@@ -281,10 +303,26 @@ impl Orchestrator {
                 }
             }
             OrderBookMessage::Resubscribe { subscription } => {
-                info!("Received resubscribe request for {}", subscription.stream_id());
+                info!(
+                    "Received resubscribe request for {}",
+                    subscription.stream_id()
+                );
                 if let Err(e) = self.resubscribe_websocket(&subscription).await {
                     error!("Resubsribing WebSocketActor failed {:?}", e);
                 };
+            }
+        }
+    }
+
+    fn handle_broadcast_actor_message(&mut self, message: BroadcastActorMessage) {
+        match message {
+            BroadcastActorMessage::Heartbeat { actor_id } => {
+                if let Some(metadata) = self.broadcast_actors.get_mut(&actor_id) {
+                    metadata.last_heartbeat = Some(Instant::now());
+                    info!("Received heartbeat from actor: {actor_id}");
+                } else {
+                    warn!("Received hearbeat from actor not in registry, actor_id: {}", actor_id);
+                }
             }
         }
     }
@@ -378,22 +416,32 @@ impl Orchestrator {
         }
     }
 
-    async fn process_pending_actions(&mut self) {
-        let mut requeue: Vec<PendingAction> = Vec::new();
-        while let Some(mut action) = self.pending_actions.pop_front() {
-            let status = action.work_on_task(self).await;
-            match status {
-                TaskStatus::Ready => {
-                    info!("✅ Action completed: {action}");
-                }
-                TaskStatus::NotReady => requeue.push(action),
-                TaskStatus::Error(e) => {
-                    error!("Action error: {:?}", e);
+    pub async fn tick_workflows(&mut self) {
+        let task = {
+            let Some(workflow) = self.workflows.front() else { return };
+            match workflow.next_task() {
+                Some(task) => task,
+                None => return,
+            }
+        };
+
+        let task_display = format!("{}", task);
+
+        match task.poll(self).await {
+            TaskOutcome::Complete => {
+                info!("{} Completed", task_display);
+                let Some(workflow) = self.workflows.front_mut() else { return };
+                workflow.advance();
+                if workflow.is_complete() {
+                    info!("✅ {} completed.", workflow);
+                    self.workflows.pop_front();
                 }
             }
-        }
-        for action in requeue {
-            self.pending_actions.push_back(action);
+            TaskOutcome::Pending => {}
+            TaskOutcome::Error(e) => {
+                error!("❌ {} Failed: {:?}", task_display, e);
+                self.workflows.pop_front();
+            }
         }
     }
 
@@ -549,37 +597,12 @@ impl Orchestrator {
             .find(|router_meta| router_meta.exchange == exchange && router_meta.is_ready())
     }
 
-    pub fn check_router_ready(&self, router_actor_id: &str) -> Result<bool, OrchestratorError> {
-        debug!("Checking if Router: {} is ready", router_actor_id);
-        match self.routers.get(router_actor_id) {
-            Some(router) => {
-                debug!("RouterActor: {router_actor_id} is ready");
-                return Ok(router.is_ready());
-            }
-            None => Err(OrchestratorError::RouterActorMissing),
-        }
-    }
-
     pub fn find_available_router(&self, exchange: Exchange) -> Option<String> {
         self.routers
             .iter()
             .filter(|(_, metadata)| metadata.exchange == exchange)
             .map(|(key, _)| key.clone())
             .next()
-    }
-
-    pub fn router_is_unsubscribed(
-        &self,
-        router_actor_id: &str,
-        subscription: &ExchangeSubscription,
-    ) -> Result<bool, OrchestratorError> {
-        if let Some(router_meta) = self.routers.get(router_actor_id) {
-            Ok(!router_meta.subscribed_streams.contains(&subscription))
-        } else {
-            Err(OrchestratorError::RouterNotFound {
-                actor_id: router_actor_id.to_string(),
-            })
-        }
     }
 
     pub fn get_router_from_ws(&self, ws_actor_id: &str) -> Result<String, OrchestratorError> {
@@ -590,26 +613,6 @@ impl Orchestrator {
                 actor_id: ws_actor_id.to_string(),
             })
         }
-    }
-
-    pub fn get_subscribed_router_actor_id(
-        &mut self,
-        subscription: &ExchangeSubscription,
-    ) -> Option<String> {
-        self.routers
-            .iter()
-            .find(|(_, metadata)| metadata.subscribed_streams.contains(subscription))
-            .map(|(actor_id, _)| actor_id.clone())
-    }
-
-    pub fn get_subscribed_router_metadata(
-        &self,
-        subscription: &ExchangeSubscription,
-    ) -> Result<&RouterMetadata, OrchestratorError> {
-        self.routers
-            .values()
-            .find(|router_meta| router_meta.subscribed_streams.contains(subscription))
-            .ok_or(OrchestratorError::RouterActorMissing)
     }
 
     // -------------------------------------------------------
@@ -664,15 +667,6 @@ impl Orchestrator {
             exchange.as_str()
         );
         return Ok(actor_id);
-    }
-
-    pub fn check_websocket_ready(&self, ws_actor_id: &str) -> Result<bool, OrchestratorError> {
-        match self.websockets.get(ws_actor_id) {
-            Some(ws) => {
-                return Ok(ws.is_ready());
-            }
-            None => Err(OrchestratorError::WebSocketActorMissing),
-        }
     }
 
     pub fn get_available_websocket(&mut self) -> Option<String> {
@@ -744,68 +738,21 @@ impl Orchestrator {
         Ok(())
     }
 
-    pub fn ws_is_subscribed(
-        &self,
-        ws_actor_id: &str,
-        subscription: &ExchangeSubscription,
-    ) -> Result<bool, OrchestratorError> {
-        if let Some(ws_meta) = self.websockets.get(ws_actor_id) {
-            Ok(ws_meta.subscribed_streams.contains(&subscription))
-        } else {
-            Err(OrchestratorError::WebSocketNotFound {
-                actor_id: ws_actor_id.to_string(),
-            })
-        }
-    }
-
-    pub fn ws_is_unsubscribed(
-        &self,
-        ws_actor_id: &str,
-        subscription: &ExchangeSubscription,
-    ) -> Result<bool, OrchestratorError> {
-        if let Some(ws_meta) = self.websockets.get(ws_actor_id) {
-            Ok(!ws_meta.subscribed_streams.contains(&subscription))
-        } else {
-            Err(OrchestratorError::WebSocketNotFound {
-                actor_id: ws_actor_id.to_string(),
-            })
-        }
-    }
-
-    pub fn get_subscribed_ws_actor_id(
-        &self,
-        subscription: &ExchangeSubscription,
-    ) -> Result<String, OrchestratorError> {
-        self.websockets
-            .iter()
-            .find(|(_actor_id, ws_meta)| ws_meta.subscribed_streams.contains(subscription))
-            .map(|(actor_id, _)| actor_id.clone())
-            .ok_or(OrchestratorError::WebSocketActorMissing)
-    }
-
-    pub fn get_subscribed_websocket_meta(
-        &self,
-        subscription: &ExchangeSubscription
-    ) -> Result<&WebSocketMetadata, OrchestratorError> {
-        self.websockets
-            .values()
-            .find(|metadata| metadata.subscribed_streams.contains(subscription))
-            .ok_or(OrchestratorError::WebSocketActorMissing)
-    }
-
     async fn resubscribe_websocket(
         &self,
-        subscription: &ExchangeSubscription
-    ) -> Result<(), OrchestratorError > {
-        let metadata = match self.get_subscribed_websocket_meta(subscription) {
-            Ok(meta) => meta,
-            Err(e) => return Err(e)
-        };
+        subscription: &ExchangeSubscription,
+    ) -> Result<(), OrchestratorError> {
+        let metadata = self.websockets
+            .values()
+            .find(|meta| meta.subscribed_streams.contains(subscription))
+            .ok_or(OrchestratorError::WebSocketActorMissing)?;
         metadata
             .command_sender
             .send(WebSocketCommand::Resubscribe(subscription.clone()))
             .await
-            .map_err(|_| OrchestratorError::WebSocketActorTimeout { actor_id: metadata.actor_id.to_string() })?;
+            .map_err(|_| OrchestratorError::WebSocketActorTimeout {
+                actor_id: metadata.actor_id.to_string(),
+            })?;
         info!("Sent Resubscribe to WebSocketActor: {}", metadata.actor_id);
         Ok(())
     }
@@ -813,7 +760,11 @@ impl Orchestrator {
     // -------------------------------------------------------
     // OrderBook Management
     // -------------------------------------------------------
-    pub async fn create_orderbook_actor(&mut self, subscription: &ExchangeSubscription) {
+    pub async fn create_orderbook_actor(
+        &mut self,
+        subscription: &ExchangeSubscription,
+        broadcast_actor_id: &str,
+    ) -> Result<String, OrchestratorError> {
         info!(
             "Creating OrderBookActor for {}",
             subscription.exchange_stream_id()
@@ -823,12 +774,20 @@ impl Orchestrator {
         let to_orch = self.orderbook_message_sender.clone();
         let (raw_market_data_sender, raw_market_data_receiver) =
             mpsc::channel::<RawMarketData>(OB_MD_RAW_BUFFER_SIZE);
+        let market_data_sender = match self.get_broadcast_market_data_sender(broadcast_actor_id) {
+            Ok(sender) => sender,
+            Err(e) => {
+                error!("Failed to get market data channel sender for BroadcastActor: {}", broadcast_actor_id);
+                return Err(e)
+            }
+        };
         let new_ob_actor = DeribitOrderBookActor::new(
             actor_id.clone(),
             subscription.clone(),
             to_orch,
             command_receiver,
             raw_market_data_receiver,
+            market_data_sender,
         );
         let join_handle = tokio::spawn(async move {
             new_ob_actor.run().await;
@@ -843,6 +802,7 @@ impl Orchestrator {
                 join_handle,
             ),
         );
+        Ok(actor_id)
     }
 
     pub async fn teardown_orderbook_actor(
@@ -876,28 +836,6 @@ impl Orchestrator {
         Ok(())
     }
 
-    pub fn check_orderbook_ready(
-        &self,
-        orderbook_actor_id: &str,
-    ) -> Result<bool, OrchestratorError> {
-        info!("Checking if OrderBook {} is ready", orderbook_actor_id);
-        match self.orderbooks.get(orderbook_actor_id) {
-            Some(orderbook_meta) => {
-                return Ok(orderbook_meta.is_ready());
-            }
-            None => Err(OrchestratorError::OrderBookNotFound {
-                actor_id: orderbook_actor_id.to_string(),
-            }),
-        }
-    }
-
-    pub fn get_orderbook_id(&self, subscription: &ExchangeSubscription) -> Option<String> {
-        self.orderbooks
-            .iter()
-            .find(|(_, metadata)| metadata.subscription.stream_id() == subscription.stream_id())
-            .map(|(key, _)| key.clone())
-    }
-
     pub fn get_channel_to_data_processing_actor(
         &self,
         subscription: &ExchangeSubscription,
@@ -913,6 +851,75 @@ impl Orchestrator {
 
     pub fn check_orderbook_teardown_complete(&self, orderbook_actor_id: &str) -> bool {
         self.orderbooks.contains_key(orderbook_actor_id)
+    }
+
+    // -------------------------------------------------------
+    // BroadcastActor Management
+    // -------------------------------------------------------
+    pub async fn create_broadcast_actor(
+        &mut self
+    ) -> String {
+        info!("Creating BroadcastActor");
+        let actor_id = generate_actor_id("BroadcastActor".to_string());
+        let (command_sender, command_receiver) =
+            mpsc::channel::<BroadcastActorCommand>(BROADCAST_MESSAGE_BUFFER_SIZE);
+        let (market_data_sender, market_data_receiver) = mpsc::channel::<ProcessedMarketData>(32);
+        let to_orch = self.broadcast_actor_message_sender.clone();
+        let new_bc_actor = BroadcastActor::new(
+            actor_id.clone(),
+            ZERO_MQ_PORT,
+            market_data_receiver,
+            command_receiver,
+            to_orch,
+        );
+        let join_handle = tokio::spawn(async move {
+            new_bc_actor.run().await;
+        });
+        self.broadcast_actors.insert(
+            actor_id.clone(),
+            BroadcastActorMetadata::new(
+                actor_id.clone(),
+                market_data_sender,
+                command_sender,
+                join_handle,
+            ),
+        );
+        return actor_id;
+    }
+
+    pub fn get_broadcast_market_data_sender(
+        &self,
+        broadcast_actor_id: &str,
+    ) -> Result<mpsc::Sender<ProcessedMarketData>, OrchestratorError> {
+        match self.broadcast_actors.get(broadcast_actor_id) {
+            Some(metadata) => return Ok(metadata.market_data_sender.clone()),
+            None => Err(OrchestratorError::BroastcastActorNotFound {
+                actor_id: broadcast_actor_id.to_string(),
+            }),
+        }
+    }
+
+    pub async fn teardown_broadcast_actor(
+        &mut self,
+        broadcast_actor_id: &str,
+    ) -> Result<(), OrchestratorError> {
+        info!(
+            "Sending command to teardown BroastcastActor: {}",
+            broadcast_actor_id
+        );
+        let Some(metadata) = self.broadcast_actors.get_mut(broadcast_actor_id) else {
+            return Err(OrchestratorError::BroastcastActorNotFound {
+                actor_id: broadcast_actor_id.to_string(),
+            });
+        };
+        metadata
+            .command_sender
+            .send(BroadcastActorCommand::Shutdown)
+            .await
+            .map_err(|_| OrchestratorError::BroastcastActorTimeout {
+                actor_id: broadcast_actor_id.to_string(),
+            })?;
+        Ok(())
     }
 }
 

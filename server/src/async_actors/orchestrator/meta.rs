@@ -1,5 +1,6 @@
 use crate::async_actors::messages::{
-    Exchange, ExchangeMessage, OrderBookCommand, RawMarketData, RouterCommand, WebSocketCommand,
+    BroadcastActorCommand, Exchange, ExchangeMessage, OrderBookCommand, ProcessedMarketData,
+    RawMarketData, RouterCommand, WebSocketCommand,
 };
 use crate::async_actors::subscription::ExchangeSubscription;
 use std::collections::HashSet;
@@ -99,6 +100,35 @@ impl OrderBookMetadata {
             orderbook_command_sender,
             last_heartbeat: None,
             raw_market_data_sender,
+            join_handle,
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.last_heartbeat.is_some()
+    }
+}
+
+pub struct BroadcastActorMetadata {
+    pub actor_id: String,
+    pub last_heartbeat: Option<Instant>,
+    pub market_data_sender: mpsc::Sender<ProcessedMarketData>,
+    pub command_sender: mpsc::Sender<BroadcastActorCommand>,
+    pub join_handle: JoinHandle<()>,
+}
+
+impl BroadcastActorMetadata {
+    pub fn new(
+        actor_id: String,
+        market_data_sender: mpsc::Sender<ProcessedMarketData>,
+        command_sender: mpsc::Sender<BroadcastActorCommand>,
+        join_handle: JoinHandle<()>,
+    ) -> Self {
+        Self {
+            actor_id,
+            last_heartbeat: None,
+            market_data_sender,
+            command_sender,
             join_handle,
         }
     }

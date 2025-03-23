@@ -1,10 +1,5 @@
 import zmq
 
-# import sys
-# from pathlib import Path
-
-# sys.path.append(str(Path(__file__).parent))
-
 from spiceflow_client.order_book import deserialise_and_print
 
 
@@ -12,7 +7,7 @@ def main():
     
     context = zmq.Context()
     socket = context.socket(zmq.SUB)
-    socket.connect("tcp://localhost:5555")
+    socket.connect("tcp://localhost:5556")
     # Subscribe to all topics
     socket.setsockopt_string(zmq.SUBSCRIBE, "")
     

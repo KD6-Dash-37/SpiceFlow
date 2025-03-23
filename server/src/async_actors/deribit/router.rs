@@ -152,11 +152,11 @@ impl DeribitRouterActor {
             .await
         {
             Ok(_) => {
-                debug!(actor_id = %self.actor_id, "Sent hearbeat");
+                debug!("Sent hearbeat");
                 true
             }
             Err(e) => {
-                error!(actor_id = %self.actor_id, "Failed to send heartbeat to Orchestrator: {e}");
+                error!("Failed to send heartbeat to Orchestrator: {e}");
                 false
             }
         }
