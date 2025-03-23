@@ -1,3 +1,5 @@
+namespace gen_templates;
+
 table PriceLevel {
     price: double;
     size: double;
