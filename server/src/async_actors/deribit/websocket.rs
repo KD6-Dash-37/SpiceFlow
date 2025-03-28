@@ -14,7 +14,7 @@ use tokio_tungstenite::{
     tungstenite::{protocol::Message, Error as TungsteniteError},
     MaybeTlsStream, WebSocketStream,
 };
-use tracing::{debug, error, warn, info, Instrument};
+use tracing::{debug, error, info, warn, Instrument};
 
 const WEBSOCKET_HEARTBEAT_INTERVAL: u64 = 5;
 const WEBSOCKET_STAY_ALIVE_INTERVAL: u64 = 5;
@@ -152,7 +152,7 @@ impl DeribitWebSocketActor {
                     } => {
                         match exchange_message_result {
                             Ok(message) => {
-                                if let Err(_) = self.router_sender.send(ExchangeMessage::new(self.actor_id.clone(), message)).await {
+                                if (self.router_sender.send(ExchangeMessage::new(self.actor_id.clone(), message)).await).is_err() {
                                     warn!("Failed to forward message to router");
                                 }
                             }
@@ -190,7 +190,7 @@ impl DeribitWebSocketActor {
                 }
             }
         }
-        .instrument(span) // Attach the span to the entire async execution
+        .instrument(span)
         .await
     }
 
@@ -276,37 +276,28 @@ impl DeribitWebSocketActor {
     }
 
     async fn subscribe(&mut self, subscription: ExchangeSubscription) {
-        match subscription {
-            ExchangeSubscription::Deribit(sub) => {
-                info!("Subscribing to {}", sub.stream_id);
-                let channels = [sub.exchange_stream_id.clone()];
-                if let Some(message) = prepare_subscription_management_message(
-                    SubscriptionManagementAction::Subscribe,
-                    &channels,
-                ) {
-                    let _ = self.send_message_to_exchange(message).await;
-                } else {
-                    error!("Failed to prepare subscription message");
-                }
-            }
+        info!("Subscribing to {}", subscription.stream_id());
+        let channels = vec![subscription.exchange_stream_id().to_string()];
+        if let Some(message) = prepare_subscription_management_message(
+            SubscriptionManagementAction::Subscribe,
+            &channels,
+        ) {
+            let _ = self.send_message_to_exchange(message).await;
+        } else {
+            error!("Failed to prepare subscription message");
         }
     }
 
     async fn unsubscribe(&mut self, subscription: ExchangeSubscription) {
-        match subscription {
-            ExchangeSubscription::Deribit(sub) => {
-                debug!("Unsubscribing from {}", sub.stream_id);
-                let channels = vec![sub.exchange_stream_id.clone()];
-
-                if let Some(message) = prepare_subscription_management_message(
-                    SubscriptionManagementAction::Unsubscribe,
-                    &channels,
-                ) {
-                    let _ = self.send_message_to_exchange(message).await;
-                } else {
-                    error!("Failed to preperate unsubscribe message");
-                }
-            }
+        info!("Unsubscribing to {}", subscription.stream_id());
+        let channels = vec![subscription.exchange_stream_id().to_string()];
+        if let Some(message) = prepare_subscription_management_message(
+            SubscriptionManagementAction::Unsubscribe,
+            &channels,
+        ) {
+            let _ = self.send_message_to_exchange(message).await;
+        } else {
+            error!("Failed to prepare subscription message");
         }
     }
 
@@ -437,7 +428,7 @@ fn prepare_subscription_management_message(
     let message = SubscriptionRequest {
         jsonrpc: DEFAULT_JSONRPC,
         id: Some(action.as_id()),
-        method: &action.as_str(),
+        method: action.as_str(),
         params: SubscriptionRequestParams { channels },
     };
     serde_json::to_string(&message).ok()

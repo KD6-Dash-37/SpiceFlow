@@ -1,7 +1,7 @@
 use crate::async_actors::deribit::websocket::SubscriptionManagementAction;
 use crate::async_actors::messages::{ExchangeMessage, RawMarketData, RouterCommand, RouterMessage};
-use crate::async_actors::orchestrator::common::RequestedFeed;
-use crate::async_actors::subscription::{ExchangeSubscription, SubscriptionInfo};
+use crate::async_actors::subscription::ExchangeSubscription;
+use crate::model::RequestedFeed;
 use std::collections::HashMap;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -178,9 +178,10 @@ impl DeribitRouterActor {
                 return Err(RouterParseError::InvalidMessageType);
             }
         };
+
         let parsed_message: serde_json::Value = serde_json::from_str(&text)?;
 
-        // ✅ Market Data Handling
+        // ✅ Handle Market Data messages (have a "params" key)
         if let Some(params) = parsed_message.get("params") {
             let exchange_stream_id = params
                 .get("channel")
@@ -199,64 +200,65 @@ impl DeribitRouterActor {
             });
         }
 
-        // ✅ Subscription Management Handling
+        // ✅ Handle subscription management messages
         let id = parsed_message
             .get("id")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| RouterParseError::MissingField("message.id".to_string()))?;
 
-        match SubscriptionManagementAction::from_id(id) {
-            Some(SubscriptionManagementAction::Subscribe) => {
-                let channels = parsed_message
-                    .get("result")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|s| s.as_str().map(String::from))
-                            .collect()
-                    })
-                    .ok_or_else(|| RouterParseError::MissingField("result".to_string()))?;
-                return Ok(ParsedMessage::Subscribe { channels });
-            }
-            Some(SubscriptionManagementAction::Unsubscribe) => {
-                let channels = parsed_message
-                    .get("result")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|s| s.as_str().map(String::from))
-                            .collect()
-                    })
-                    .ok_or_else(|| RouterParseError::MissingField("result".to_string()))?;
-                return Ok(ParsedMessage::Unsubscribe { channels });
-            }
-            Some(SubscriptionManagementAction::UnsubscribeAll) => {
-                let result = parsed_message
-                    .get("result")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| RouterParseError::MissingField("result".to_string()))?
-                    .to_string();
-                return Ok(ParsedMessage::UnsubscribeAll { result });
-            }
-            Some(SubscriptionManagementAction::Test) => {
-                if let Some(result) = parsed_message.get("result") {
-                    let version = result
-                        .get("version")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| RouterParseError::MissingField("version".to_string()))?
-                        .to_string();
-                    return Ok(ParsedMessage::Test { version });
-                } else {
-                    return Err(RouterParseError::MissingField("result".to_string()));
+        use SubscriptionManagementAction::*;
+
+        let result = parsed_message
+            .get("result")
+            .ok_or_else(|| RouterParseError::MissingField("result".to_string()))?;
+
+        let message = match SubscriptionManagementAction::from_id(id) {
+            Some(Subscribe) | Some(Unsubscribe) => {
+                let channels = result
+                    .as_array()
+                    .ok_or_else(|| {
+                        RouterParseError::MissingField("result (expected array)".to_string())
+                    })?
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(String::from)
+                    .collect();
+
+                match SubscriptionManagementAction::from_id(id) {
+                    Some(Subscribe) => ParsedMessage::Subscribe { channels },
+                    Some(Unsubscribe) => ParsedMessage::Unsubscribe { channels },
+                    _ => unreachable!(),
                 }
             }
+
+            Some(UnsubscribeAll) => {
+                let result_str = result
+                    .as_str()
+                    .ok_or_else(|| {
+                        RouterParseError::MissingField("result (expected string)".to_string())
+                    })?
+                    .to_string();
+                ParsedMessage::UnsubscribeAll { result: result_str }
+            }
+
+            Some(Test) => {
+                let version = result
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| RouterParseError::MissingField("version".to_string()))?
+                    .to_string();
+                ParsedMessage::Test { version }
+            }
+
             None => {
                 warn!("⚠️ Unknown subscription management action ID: {}", id);
                 return Err(RouterParseError::InvalidSubscriptionManagementMessage(
                     parsed_message,
                 ));
             }
-        }
+        };
+
+        Ok(message)
     }
 
     async fn handle_market_data_message(
@@ -279,14 +281,13 @@ impl DeribitRouterActor {
 
         match subscription.feed_type() {
             RequestedFeed::OrderBook => {
-                match self.to_data_processor.get_mut(subscription.stream_id()) {
-                    Some(sender) => match sender.send(market_data).await {
+                if let Some(sender) = self.to_data_processor.get_mut(subscription.stream_id()) {
+                    match sender.send(market_data).await {
                         Ok(_) => {}
                         Err(e) => {
                             error!("Failed to send RawMarketData to Data Processor: {e}");
                         }
-                    },
-                    None => {}
+                    }
                 }
             }
         }
@@ -300,15 +301,18 @@ impl DeribitRouterActor {
             } => {
                 let exchange_stream_id = subscription.exchange_stream_id().to_string();
                 let stream_id = subscription.stream_id().to_string();
-                if self.registered_streams.contains_key(&exchange_stream_id) {
-                    warn!("Trying to register duplicate stream ID: {}", stream_id);
-                } else {
-                    self.registered_streams
-                        .insert(exchange_stream_id, subscription);
-                    debug!("Registered subscription: {}", stream_id);
-                    self.to_data_processor
-                        .insert(stream_id.clone(), raw_market_data_sender);
-                    info!("Updated raw market channels to include: {}", stream_id);
+
+                match self.registered_streams.entry(exchange_stream_id) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(subscription);
+                        debug!("Registered subscription: {}", stream_id);
+                        self.to_data_processor
+                            .insert(stream_id.clone(), raw_market_data_sender);
+                        info!("Updated raw market channels to include: {}", stream_id);
+                    }
+                    std::collections::hash_map::Entry::Occupied(_) => {
+                        warn!("Trying to register duplicate stream ID: {}", stream_id);
+                    }
                 }
             }
             RouterCommand::Remove { subscription } => {

@@ -1,15 +1,17 @@
+use crate::async_actors::messages::Topic;
 use crate::async_actors::messages::{
-    BroadcastActorCommand, BroadcastActorMessage, ProcessedMarketData, ProcessedOrderBookData
+    BroadcastActorCommand, BroadcastActorMessage, ProcessedMarketData, ProcessedOrderBookData,
+};
+use crate::templates::order_book_generated::{
+    OrderBook, OrderBookArgs, PriceLevel, PriceLevelArgs,
 };
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use futures_util::lock::Mutex;
+use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 use tracing::{error, info, warn, Instrument};
-use crate::templates::order_book_generated::{OrderBook, OrderBookArgs, PriceLevel, PriceLevelArgs};
-use thiserror::Error;
 use zmq;
-use crate::async_actors::messages::Topic;
 pub trait ZmqSocketInterface {
     fn send(&self, data: &[u8], flags: i32) -> Result<(), String>;
 }
@@ -21,7 +23,7 @@ impl ZmqSocketInterface for zmq::Socket {
     }
 }
 
-const DEFAULT_BUILDER_POOL_SIZE: usize = 10; 
+const DEFAULT_BUILDER_POOL_SIZE: usize = 10;
 const BROADCAST_ACTOR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
@@ -51,16 +53,19 @@ impl BroadcastActor {
         from_orch: mpsc::Receiver<BroadcastActorCommand>,
         to_orch: mpsc::Sender<BroadcastActorMessage>,
     ) -> Self {
-        
         let (zmq_sender, mut zmq_receiver) = mpsc::channel::<(String, Vec<u8>)>(32);
 
         std::thread::Builder::new()
             .name("zmq-publisher".into())
             .spawn(move || {
                 let context = zmq::Context::new();
-                let socket = context.socket(zmq::PUB).expect("❌ Failed to create ZeroMQ PUB socket");
+                let socket = context
+                    .socket(zmq::PUB)
+                    .expect("❌ Failed to create ZeroMQ PUB socket");
                 let endpoint = format!("tcp://*:{}", zmq_port);
-                socket.bind(&endpoint).expect("❌ Failed to bind ZeroMQ PUB socket");
+                socket
+                    .bind(&endpoint)
+                    .expect("❌ Failed to bind ZeroMQ PUB socket");
                 info!("📡 ZeroMQ PUB socket bound to {}", endpoint);
                 while let Some((topic, payload)) = zmq_receiver.blocking_recv() {
                     if let Err(e) = socket.send(topic.as_bytes(), zmq::SNDMORE) {
@@ -92,8 +97,7 @@ impl BroadcastActor {
         );
 
         async move {
-            let mut heartbeat_interval =
-                time::interval(BROADCAST_ACTOR_HEARTBEAT_INTERVAL);
+            let mut heartbeat_interval = time::interval(BROADCAST_ACTOR_HEARTBEAT_INTERVAL);
 
             loop {
                 tokio::select! {
@@ -117,7 +121,7 @@ impl BroadcastActor {
                                 warn!("Could not serialise data: {}", e);
                             }
                         };
-                        
+
                     }
 
                     Some(command) = self.from_orch.recv() => {
@@ -154,50 +158,44 @@ impl BroadcastActor {
         }
     }
 
-    async fn broadcast_data(&self, topic: &str, payload: Vec<u8>) -> Result<(), BroadcastError>{
-        match self.zmq_sender
-            .send((topic.to_string(), payload))
-            .await
-        {
+    async fn broadcast_data(&self, topic: &str, payload: Vec<u8>) -> Result<(), BroadcastError> {
+        match self.zmq_sender.send((topic.to_string(), payload)).await {
             Ok(_) => Ok(()),
-            Err(e) => Err(BroadcastError::SendData(
-                format!("Failed to send over ZMQ channel: {e}")
-            ))
+            Err(e) => Err(BroadcastError::SendData(format!(
+                "Failed to send over ZMQ channel: {e}"
+            ))),
         }
-
     }
 
     async fn serialise_market_data(
         &self,
-        data: &ProcessedMarketData
+        data: &ProcessedMarketData,
     ) -> Result<Vec<u8>, BroadcastError> {
         match data {
-            ProcessedMarketData::OrderBook(ob) => {
-                self.serialise_order_book_data(ob).await
-            }
+            ProcessedMarketData::OrderBook(ob) => self.serialise_order_book_data(ob).await,
         }
     }
 
     async fn serialise_order_book_data(
         &self,
-        data: &ProcessedOrderBookData
+        data: &ProcessedOrderBookData,
     ) -> Result<Vec<u8>, BroadcastError> {
         let mut builder = self.builder_pool.acquire_builder().await;
-        
+
         let bids: Vec<WIPOffset<PriceLevel>> = data
             .bids
             .iter()
-            .map(|(price, size)|{
+            .map(|(price, size)| {
                 PriceLevel::create(
                     &mut builder,
                     &PriceLevelArgs {
                         price: price.into_inner(),
-                        size: *size
-                    }
+                        size: *size,
+                    },
                 )
             })
             .collect();
-        
+
         let asks: Vec<WIPOffset<PriceLevel>> = data
             .asks
             .iter()
@@ -206,12 +204,12 @@ impl BroadcastActor {
                     &mut builder,
                     &PriceLevelArgs {
                         price: price.into_inner(),
-                        size: *size
-                    }
+                        size: *size,
+                    },
                 )
             })
             .collect();
-        
+
         let topic = builder.create_string(&data.stream_id);
 
         let bids = builder.create_vector(&bids);

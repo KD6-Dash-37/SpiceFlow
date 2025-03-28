@@ -1,9 +1,10 @@
 use crate::async_actors::messages::{
-    BroadcastActorCommand, Exchange, ExchangeMessage, OrderBookCommand, ProcessedMarketData,
-    RawMarketData, RouterCommand, WebSocketCommand,
+    BroadcastActorCommand, ExchangeMessage, OrderBookCommand, ProcessedMarketData, RawMarketData,
+    RouterCommand, WebSocketCommand,
 };
 use crate::async_actors::subscription::ExchangeSubscription;
-use std::collections::HashSet;
+use crate::model::Exchange;
+use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -12,8 +13,8 @@ pub struct WebSocketMetadata {
     pub actor_id: String,
     pub command_sender: mpsc::Sender<WebSocketCommand>,
     pub router_actor_id: String,
-    pub requested_streams: HashSet<ExchangeSubscription>,
-    pub subscribed_streams: HashSet<ExchangeSubscription>,
+    pub requested_streams: HashMap<String, ExchangeSubscription>,
+    pub subscribed_streams: HashMap<String, ExchangeSubscription>,
     pub last_heartbeat: Option<Instant>,
     pub join_handle: JoinHandle<()>,
 }
@@ -23,16 +24,15 @@ impl WebSocketMetadata {
         actor_id: String,
         command_sender: mpsc::Sender<WebSocketCommand>,
         router_actor_id: String,
-        requested_streams: HashSet<ExchangeSubscription>,
+        requested_streams: HashMap<String, ExchangeSubscription>,
         join_handle: JoinHandle<()>,
     ) -> Self {
-        let subscribed_streams = HashSet::new();
         Self {
             actor_id,
             command_sender,
             router_actor_id,
             requested_streams,
-            subscribed_streams,
+            subscribed_streams: HashMap::new(),
             last_heartbeat: None,
             join_handle,
         }
@@ -48,7 +48,7 @@ pub struct RouterMetadata {
     pub exchange: Exchange,
     pub router_sender: mpsc::Sender<ExchangeMessage>,
     pub router_command_sender: mpsc::Sender<RouterCommand>,
-    pub subscribed_streams: HashSet<ExchangeSubscription>,
+    pub subscribed_streams: HashMap<String, ExchangeSubscription>,
     pub last_heartbeat: Option<Instant>,
     pub join_handle: JoinHandle<()>,
 }
@@ -66,7 +66,7 @@ impl RouterMetadata {
             exchange,
             router_sender,
             router_command_sender,
-            subscribed_streams: HashSet::new(),
+            subscribed_streams: HashMap::new(),
             last_heartbeat: None,
             join_handle,
         }

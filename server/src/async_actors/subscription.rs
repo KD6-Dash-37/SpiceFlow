@@ -1,80 +1,29 @@
-use crate::async_actors::messages::Exchange;
-use crate::async_actors::orchestrator::common::RequestedFeed;
-use std::hash::{Hash, Hasher};
+use crate::model::{Exchange, RequestedFeed};
 
-pub trait SubscriptionInfo {
+pub type ExchangeSubscription = Box<dyn SubscriptionInfo>;
+
+impl From<DeribitSubscription> for ExchangeSubscription {
+    fn from(sub: DeribitSubscription) -> Self {
+        Box::new(sub)
+    }
+}
+
+pub trait SubscriptionInfo: std::fmt::Debug + Send + Sync {
+    fn stream_id(&self) -> &str;
     fn exchange_symbol(&self) -> &str;
     fn exchange_stream_id(&self) -> &str;
     fn feed_type(&self) -> RequestedFeed;
     fn exchange(&self) -> Exchange;
+    fn clone_box(&self) -> Box<dyn SubscriptionInfo>;
 }
 
-#[derive(Debug, Clone)]
-pub enum ExchangeSubscription {
-    Deribit(DeribitSubscription),
-}
-
-impl PartialEq for ExchangeSubscription {
-    fn eq(&self, other: &Self) -> bool {
-        self.stream_id() == other.stream_id()
+impl Clone for Box<dyn SubscriptionInfo> {
+    fn clone(&self) -> Self {
+        self.clone_box()
     }
 }
 
-impl Eq for ExchangeSubscription {}
-
-impl Hash for ExchangeSubscription {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.stream_id().hash(state);
-    }
-}
-
-impl ExchangeSubscription {
-    pub fn stream_id(&self) -> &str {
-        match self {
-            ExchangeSubscription::Deribit(sub) => &sub.stream_id,
-        }
-    }
-}
-
-impl SubscriptionInfo for ExchangeSubscription {
-    fn exchange_symbol(&self) -> &str {
-        match self {
-            ExchangeSubscription::Deribit(sub) => sub.exchange_symbol(),
-        }
-    }
-    fn feed_type(&self) -> RequestedFeed {
-        match self {
-            ExchangeSubscription::Deribit(sub) => sub.feed_type(),
-        }
-    }
-    fn exchange_stream_id(&self) -> &str {
-        match self {
-            ExchangeSubscription::Deribit(sub) => sub.exchange_stream_id(),
-        }
-    }
-    fn exchange(&self) -> Exchange {
-        match self {
-            ExchangeSubscription::Deribit(sub) => sub.exchange(),
-        }
-    }
-}
-
-impl SubscriptionInfo for DeribitSubscription {
-    fn exchange_symbol(&self) -> &str {
-        &self.exchange_symbol
-    }
-    fn feed_type(&self) -> RequestedFeed {
-        self.requested_feed
-    }
-    fn exchange_stream_id(&self) -> &str {
-        &self.exchange_stream_id
-    }
-    fn exchange(&self) -> Exchange {
-        self.exchange
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DeribitSubscription {
     pub internal_symbol: String,
     pub exchange_symbol: String,
@@ -84,17 +33,37 @@ pub struct DeribitSubscription {
     pub exchange: Exchange,
 }
 
-impl PartialEq for DeribitSubscription {
-    fn eq(&self, other: &Self) -> bool {
-        self.stream_id == other.stream_id
+impl Clone for DeribitSubscription {
+    fn clone(&self) -> Self {
+        Self {
+            internal_symbol: self.internal_symbol.clone(),
+            exchange_symbol: self.exchange_symbol.clone(),
+            requested_feed: self.requested_feed,
+            stream_id: self.stream_id.clone(),
+            exchange_stream_id: self.exchange_stream_id.clone(),
+            exchange: self.exchange,
+        }
     }
 }
 
-impl Eq for DeribitSubscription {}
-
-impl Hash for DeribitSubscription {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.stream_id.hash(state);
+impl SubscriptionInfo for DeribitSubscription {
+    fn stream_id(&self) -> &str {
+        &self.stream_id
+    }
+    fn exchange_symbol(&self) -> &str {
+        &self.exchange_symbol
+    }
+    fn exchange_stream_id(&self) -> &str {
+        &self.exchange_stream_id
+    }
+    fn feed_type(&self) -> RequestedFeed {
+        self.requested_feed
+    }
+    fn exchange(&self) -> Exchange {
+        self.exchange
+    }
+    fn clone_box(&self) -> Box<dyn SubscriptionInfo> {
+        Box::new(self.clone())
     }
 }
 
@@ -105,12 +74,11 @@ impl DeribitSubscription {
         requested_feed: RequestedFeed,
         exchange: Exchange,
     ) -> Self {
-        let stream_id = format!("{}.{}", internal_symbol, requested_feed.as_str());
+        let stream_id = format!("{}.{}", internal_symbol, requested_feed);
         let exchange_stream_id = match requested_feed {
-            RequestedFeed::OrderBook => {
-                format!("book.{}.100ms", &exchange_symbol)
-            }
+            RequestedFeed::OrderBook => format!("book.{}.100ms", &exchange_symbol),
         };
+
         Self {
             internal_symbol,
             exchange_symbol,
