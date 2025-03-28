@@ -1,15 +1,11 @@
 // New Framework (In Development!)
-
 use dotenv::dotenv;
-use server::async_actors::messages::{DummyRequest, Exchange};
-use server::async_actors::orchestrator::common::RequestedFeed;
-use server::async_actors::orchestrator::orch::Orchestrator;
-use std::time::Duration;
-use tokio;
-use tokio::sync::mpsc;
-use tokio::time;
+use server::async_actors::orchestrator::Orchestrator;
+use server::http_api::handle::SubscriptionAction;
+use server::http_api::start_http_server;
+use server::http_api::OrchestratorHandle;
+use tokio::{signal, sync::mpsc};
 use tracing::info;
-use tracing_subscriber;
 
 #[tokio::main]
 async fn main() {
@@ -23,72 +19,26 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     // Create a channel for the dummy gRPC requests
-    let (dummy_grpc_sender, dummy_grpc_receiver) = mpsc::channel::<DummyRequest>(32);
-
+    // let (dummy_grpc_sender, dummy_grpc_receiver) = mpsc::channel::<DummyRequest>(32);
+    let (request_sender, request_receiver) = mpsc::channel::<SubscriptionAction>(32);
     // Initialise the orchestrator with the dummy gRPC receiver
-    let orchestrator = Orchestrator::new(dummy_grpc_receiver);
+    let orchestrator = Orchestrator::new(request_receiver);
 
     // Spawn the orchestrator's main loop
     tokio::spawn(async move {
         orchestrator.run().await;
     });
 
-    // Allow the orchestrator time to initialise
-    time::sleep(time::Duration::from_secs(1)).await;
+    let http_handle = OrchestratorHandle::new(request_sender);
 
-    // Send the dummy subscribe request (first websocket actor)
-    dummy_grpc_sender
-        .send(DummyRequest::Subscribe {
-            internal_symbol: "Deribit.InvFut.BTC.USD".to_string(),
-            exchange: Exchange::Deribit,
-            exchange_symbol: "BTC-PERPETUAL".to_string(),
-            requested_feed: RequestedFeed::OrderBook,
-        })
-        .await
-        .expect("Failed to send first subscribe request");
+    tokio::spawn(async move {
+        start_http_server(http_handle).await;
+    });
 
-    // Wait to observe heartbeats from the first actor
-    time::sleep(Duration::from_secs(5)).await;
+    info!("🌱 System started. Press Ctrl+C to shut down.");
 
-    // Send another dummy subscribe request.
-    dummy_grpc_sender
-        .send(DummyRequest::Subscribe {
-            internal_symbol: "Deribit.InvFut.ETH.USD".to_string(),
-            exchange: Exchange::Deribit,
-            exchange_symbol: "ETH-PERPETUAL".to_string(),
-            requested_feed: RequestedFeed::OrderBook,
-        })
-        .await
-        .expect("Failed to send second subscribe request");
-
-    time::sleep(Duration::from_secs(5)).await;
-
-    // Send a dummy unsubscribe request for the first symbol
-    dummy_grpc_sender
-        .send(DummyRequest::Unsubscribe {
-            internal_symbol: "Deribit.InvFut.BTC.USD".to_string(),
-            exchange: Exchange::Deribit,
-            exchange_symbol: "BTC-PERPETUAL".to_string(),
-            requested_feed: RequestedFeed::OrderBook,
-        })
-        .await
-        .expect("Failed to send first subscribe request");
-
-    time::sleep(Duration::from_secs(5)).await;
-
-    // Send a dummy unsubscribe request for the second symbol
-    dummy_grpc_sender
-        .send(DummyRequest::Unsubscribe {
-            internal_symbol: "Deribit.InvFut.ETH.USD".to_string(),
-            exchange: Exchange::Deribit,
-            exchange_symbol: "ETH-PERPETUAL".to_string(),
-            requested_feed: RequestedFeed::OrderBook,
-        })
-        .await
-        .expect("Failed to send second unsubscribe request");
-
-    // Wait to observe heartbeats from the first actor
-    time::sleep(Duration::from_secs(5)).await;
-
-    info!("Main function is exiting.");
+    if let Err(err) = signal::ctrl_c().await {
+        eprintln!("❌ Failed to listen for Ctrl+C: {}", err);
+    }
+    info!("🛑 Received shutdown signal, exiting.");
 }

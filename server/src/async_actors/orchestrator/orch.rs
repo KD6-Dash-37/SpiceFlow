@@ -1,29 +1,24 @@
-use super::common::RequestedFeed;
 use super::meta::{BroadcastActorMetadata, OrderBookMetadata, RouterMetadata, WebSocketMetadata};
 use crate::async_actors::broadcast::BroadcastActor;
 use crate::async_actors::deribit::orderbook::DeribitOrderBookActor;
 use crate::async_actors::deribit::router::DeribitRouterActor;
 use crate::async_actors::deribit::websocket::DeribitWebSocketActor;
 use crate::async_actors::messages::{
-    BroadcastActorCommand, BroadcastActorMessage, DummyRequest, Exchange, OrderBookCommand,
-    OrderBookMessage, ProcessedMarketData, RawMarketData, RouterCommand, RouterMessage,
-    WebSocketCommand, WebSocketMessage,
+    BroadcastActorCommand, BroadcastActorMessage, OrderBookCommand, OrderBookMessage,
+    ProcessedMarketData, RawMarketData, RouterCommand, RouterMessage, WebSocketCommand,
+    WebSocketMessage,
 };
-use crate::async_actors::subscription::SubscriptionInfo;
-use crate::async_actors::subscription::{DeribitSubscription, ExchangeSubscription};
-use std::collections::{HashMap, HashSet, VecDeque};
+use crate::async_actors::orchestrator::tasks::{TaskOutcome, Workflow, WorkflowKind};
+use crate::async_actors::subscription::ExchangeSubscription;
+use crate::http_api::handle::SubscriptionAction;
+use crate::model::{Exchange, RequestedFeed};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use std::u16;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn, Instrument};
-use crate::async_actors::orchestrator::tasks::{
-    TaskOutcome,
-    Workflow,
-    WorkflowKind,
-};
 // TODO used for actor ID's make more robust later
 static ACTOR_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -59,6 +54,8 @@ pub enum OrchestratorError {
         stream_id: String,
         router_actor_id: String,
     },
+    #[error("❌ Channel closed")]
+    ChannelClosed,
 
     // -------------------------------------------------------
     // Cannot find actor by type
@@ -101,7 +98,7 @@ pub struct Orchestrator {
     pub routers: HashMap<String, RouterMetadata>,
     pub orderbooks: HashMap<String, OrderBookMetadata>,
     pub broadcast_actors: HashMap<String, BroadcastActorMetadata>,
-    dummy_grpc_receiver: mpsc::Receiver<DummyRequest>,
+    request_receiver: mpsc::Receiver<SubscriptionAction>,
     from_ws: mpsc::Receiver<WebSocketMessage>,
     ws_message_sender: mpsc::Sender<WebSocketMessage>,
     from_router: mpsc::Receiver<RouterMessage>,
@@ -114,7 +111,7 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
-    pub fn new(dummy_grpc_receiver: mpsc::Receiver<DummyRequest>) -> Self {
+    pub fn new(request_receiver: mpsc::Receiver<SubscriptionAction>) -> Self {
         let (ws_message_sender, from_ws) = mpsc::channel(WS_MESSAGE_BUFFER_SIZE);
         let (router_message_sender, from_router) = mpsc::channel(ROUTER_MESSAGE_BUFFER_SIZE);
         let (orderbook_message_sender, from_orderbook) = mpsc::channel(OB_MESSAGE_BUFFER_SIZE);
@@ -125,7 +122,7 @@ impl Orchestrator {
             routers: HashMap::new(),
             orderbooks: HashMap::new(),
             broadcast_actors: HashMap::new(),
-            dummy_grpc_receiver,
+            request_receiver,
             from_ws,
             ws_message_sender,
             from_router,
@@ -145,8 +142,8 @@ impl Orchestrator {
             let mut task_check_interval = interval(Duration::from_millis(50));
             loop {
                 tokio::select! {
-                    Some(grpc_request) = self.dummy_grpc_receiver.recv() => {
-                        self.handle_request(grpc_request).await;
+                    Some(request) = self.request_receiver.recv() => {
+                        self._handle_request(request).await;
                     }
                     Some(ws_message) = self.from_ws.recv() => {
                         self.handle_websocket_message(ws_message).await;
@@ -171,60 +168,15 @@ impl Orchestrator {
         .await
     }
 
-    async fn handle_request(&mut self, grpc_request: DummyRequest) {
-        match grpc_request {
-            DummyRequest::Subscribe {
-                internal_symbol,
-                exchange,
-                exchange_symbol,
-                requested_feed,
-            } => {
-                info!(
-                    "📡 Received subscribe request for {internal_symbol}.{:?}",
-                    requested_feed
-                );
-                let subscription: ExchangeSubscription = match exchange {
-                    Exchange::Deribit => ExchangeSubscription::Deribit(DeribitSubscription::new(
-                        internal_symbol,
-                        exchange_symbol,
-                        requested_feed,
-                        Exchange::Deribit,
-                    )),
-                };
-                self.workflows.push_back(
-                    Workflow::new(
-                        subscription,
-                        WorkflowKind::Subscribe,
-                    )
-                );
-                info!("🧵 Enqueued WorkflowKind::Subscribe");
-                }
-
-            DummyRequest::Unsubscribe {
-                internal_symbol,
-                exchange,
-                exchange_symbol,
-                requested_feed,
-            } => {
-                info!(
-                    "📡 Received unsubscribe request for {internal_symbol}.{:?}",
-                    requested_feed
-                );
-                let subscription = match exchange {
-                    Exchange::Deribit => ExchangeSubscription::Deribit(DeribitSubscription::new(
-                        internal_symbol,
-                        exchange_symbol,
-                        requested_feed,
-                        Exchange::Deribit,
-                    )),
-                };
-                self.workflows.push_back(
-                    Workflow::new(
-                        subscription,
-                        WorkflowKind::Unsubscribe,
-                    )
-                );
-                info!("🧵 Enqueued WorkflowKind::Unsubscribe");
+    async fn _handle_request(&mut self, request: SubscriptionAction) {
+        match request {
+            SubscriptionAction::Subscribe(subscription) => {
+                self.workflows
+                    .push_back(Workflow::new(subscription, WorkflowKind::Subscribe));
+            }
+            SubscriptionAction::Unsubscribe(subscription) => {
+                self.workflows
+                    .push_back(Workflow::new(subscription, WorkflowKind::Unsubscribe));
             }
         }
     }
@@ -242,13 +194,13 @@ impl Orchestrator {
             WebSocketMessage::Disconnected { actor_id } => {
                 // TODO review the re-connect policy, what should we do here, try and re-use the existing actor or spawn a new one?
                 warn!("{} reported disconnection", actor_id);
-                if let Some(_) = self.websockets.remove(&actor_id) {
+                if self.websockets.remove(&actor_id).is_some() {
                     warn!("ws_actor: {actor_id} has been disconnected")
                 }
             }
             WebSocketMessage::Shutdown { actor_id } => {
                 info!("{} reported shut_down complete", actor_id);
-                if let Some(_) = self.websockets.remove(&actor_id) {
+                if self.websockets.remove(&actor_id).is_some() {
                     info!("ws_actor: {actor_id} has been removed from actor registry");
                 }
             }
@@ -293,7 +245,7 @@ impl Orchestrator {
                 }
             }
             OrderBookMessage::Shutdown { actor_id } => {
-                if let Some(_) = self.orderbooks.remove(&actor_id) {
+                if self.orderbooks.remove(&actor_id).is_some() {
                     info!(
                         "Shutdown confirmed for OrderBookActor: {} received, removed from metadata",
                         actor_id
@@ -321,7 +273,10 @@ impl Orchestrator {
                     metadata.last_heartbeat = Some(Instant::now());
                     info!("Received heartbeat from actor: {actor_id}");
                 } else {
-                    warn!("Received hearbeat from actor not in registry, actor_id: {}", actor_id);
+                    warn!(
+                        "Received hearbeat from actor not in registry, actor_id: {}",
+                        actor_id
+                    );
                 }
             }
         }
@@ -345,24 +300,28 @@ impl Orchestrator {
 
         let requested_subscription = ws_meta
             .requested_streams
-            .iter()
+            .values()
             .find(|sub| sub.exchange_symbol() == exchange_symbol && sub.feed_type() == feed_type)
             .cloned();
 
         match requested_subscription {
             Some(subscription) => {
-                ws_meta.requested_streams.remove(&subscription);
+                ws_meta.requested_streams.remove(subscription.stream_id());
                 debug!(
                     "Confirmed Subscribe for: {} from actor: {}",
                     subscription.stream_id(),
                     ws_actor_id
                 );
-                ws_meta.subscribed_streams.insert(subscription.clone());
+                ws_meta
+                    .subscribed_streams
+                    .insert(subscription.stream_id().to_string(), subscription.clone());
                 debug!(
                     "Subscribe confirmation updated in Router: {} metadata",
                     router_meta.actor_id
                 );
-                router_meta.subscribed_streams.insert(subscription.clone());
+                router_meta
+                    .subscribed_streams
+                    .insert(subscription.stream_id().to_string(), subscription.clone());
             }
             None => {
                 warn!(
@@ -388,18 +347,23 @@ impl Orchestrator {
         // ✅ 2️⃣ Look for the subscription in the websocket metadata
         let stopped_subscription = ws_meta
             .subscribed_streams
-            .iter()
+            .values()
             .find(|sub| sub.exchange_symbol() == exchange_symbol && sub.feed_type() == feed_type)
             .cloned();
 
         match stopped_subscription {
             Some(subscription) => {
                 // ✅ 3️⃣ Remove from `subscribed_streams`
-                if !ws_meta.subscribed_streams.remove(&subscription) {
+                if ws_meta
+                    .subscribed_streams
+                    .remove(subscription.stream_id())
+                    .is_none()
+                {
                     warn!(
                         "⚠️ Tried to remove subscription {} from WebSocketMetadata for actor {}, but it wasn't found in subscribed_streams",
                         subscription.stream_id(), ws_actor_id
                     );
+                    return;
                 }
                 debug!(
                     "✅ Confirmed Unsubscribe for {} from actor: {}",
@@ -418,7 +382,9 @@ impl Orchestrator {
 
     pub async fn tick_workflows(&mut self) {
         let task = {
-            let Some(workflow) = self.workflows.front() else { return };
+            let Some(workflow) = self.workflows.front() else {
+                return;
+            };
             match workflow.next_task() {
                 Some(task) => task,
                 None => return,
@@ -430,7 +396,9 @@ impl Orchestrator {
         match task.poll(self).await {
             TaskOutcome::Complete => {
                 info!("{} Completed", task_display);
-                let Some(workflow) = self.workflows.front_mut() else { return };
+                let Some(workflow) = self.workflows.front_mut() else {
+                    return;
+                };
                 workflow.advance();
                 if workflow.is_complete() {
                     info!("✅ {} completed.", workflow);
@@ -446,31 +414,16 @@ impl Orchestrator {
     }
 
     // -------------------------------------------------------
-    // General State Management
-    // -------------------------------------------------------
-
-    pub fn check_if_subscribed(&mut self, subscription: &ExchangeSubscription) -> bool {
-        match &subscription {
-            ExchangeSubscription::Deribit(sub) => &sub.stream_id.clone(),
-        };
-        if let Some(_) = self
-            .websockets
-            .iter_mut()
-            .find(|(_id, meta)| meta.subscribed_streams.contains(&subscription))
-        {
-            return true;
-        }
-        return false;
-    }
-
-    // -------------------------------------------------------
     // Router Management
     // -------------------------------------------------------
     pub async fn create_router(
         &mut self,
         exchange: &Exchange,
     ) -> Result<String, OrchestratorError> {
-        debug!("Creating RouterActor for exchange: {}", exchange.as_str());
+        debug!(
+            "Creating RouterActor for exchange: {}",
+            exchange.to_string()
+        );
         let actor_id = generate_actor_id("DeribitRouterActor".to_string());
         let (router_sender, router_receiver) = mpsc::channel(32);
         let (router_command_receiver, from_orch) = mpsc::channel(32);
@@ -484,7 +437,7 @@ impl Orchestrator {
         debug!("Created a new DeribitRouter, actor_id: {}", actor_id);
         let router_meta = RouterMetadata::new(
             actor_id.clone(),
-            exchange.clone(),
+            *exchange,
             router_sender.clone(),
             router_command_receiver,
             join_handle,
@@ -572,7 +525,11 @@ impl Orchestrator {
                 actor_id: router_actor_id.to_string(),
             })?;
 
-        if router_metadata.subscribed_streams.remove(&subscription) {
+        if router_metadata
+            .subscribed_streams
+            .remove(subscription.stream_id())
+            .is_some()
+        {
             info!(
                 "Removed {} from RouterActor: {} metadata.subscribed_streams",
                 subscription.stream_id(),
@@ -625,7 +582,7 @@ impl Orchestrator {
     ) -> Result<String, OrchestratorError> {
         debug!(
             "Creating WebSocketActor for exchange: {}",
-            exchange.as_str()
+            exchange.to_string()
         );
         let router = match self.routers.get(router_actor_id) {
             Some(router) => router,
@@ -651,7 +608,7 @@ impl Orchestrator {
         let join_handle = tokio::spawn(async move {
             new_ws_actor.run().await;
         });
-        let requested_streams: HashSet<ExchangeSubscription> = HashSet::new();
+        let requested_streams: HashMap<String, ExchangeSubscription> = HashMap::new();
         self.websockets.insert(
             actor_id.clone(),
             WebSocketMetadata::new(
@@ -664,9 +621,9 @@ impl Orchestrator {
         );
         debug!(
             "WebSocket actor successfully created for {}",
-            exchange.as_str()
+            exchange.to_string()
         );
-        return Ok(actor_id);
+        Ok(actor_id)
     }
 
     pub fn get_available_websocket(&mut self) -> Option<String> {
@@ -703,7 +660,9 @@ impl Orchestrator {
             })?;
 
         debug!("Requested subscription of {stream_id} from WebSocketActor: {ws_actor_id}");
-        ws_meta.requested_streams.insert(subscription);
+        ws_meta
+            .requested_streams
+            .insert(subscription.stream_id().to_string(), subscription);
         Ok(())
     }
 
@@ -742,9 +701,13 @@ impl Orchestrator {
         &self,
         subscription: &ExchangeSubscription,
     ) -> Result<(), OrchestratorError> {
-        let metadata = self.websockets
+        let metadata = self
+            .websockets
             .values()
-            .find(|meta| meta.subscribed_streams.contains(subscription))
+            .find(|meta| {
+                meta.subscribed_streams
+                    .contains_key(subscription.stream_id())
+            })
             .ok_or(OrchestratorError::WebSocketActorMissing)?;
         metadata
             .command_sender
@@ -777,8 +740,11 @@ impl Orchestrator {
         let market_data_sender = match self.get_broadcast_market_data_sender(broadcast_actor_id) {
             Ok(sender) => sender,
             Err(e) => {
-                error!("Failed to get market data channel sender for BroadcastActor: {}", broadcast_actor_id);
-                return Err(e)
+                error!(
+                    "Failed to get market data channel sender for BroadcastActor: {}",
+                    broadcast_actor_id
+                );
+                return Err(e);
             }
         };
         let new_ob_actor = DeribitOrderBookActor::new(
@@ -820,7 +786,7 @@ impl Orchestrator {
                 actor_id: orderbook_actor_id.to_string(),
             });
         };
-        if metadata.subscription != *subscription {
+        if metadata.subscription.stream_id() != subscription.stream_id() {
             return Err(OrchestratorError::ExistingSubscriptionNotFound {
                 stream_id: subscription.stream_id().to_string(),
             });
@@ -844,7 +810,7 @@ impl Orchestrator {
             RequestedFeed::OrderBook => self
                 .orderbooks
                 .iter()
-                .find(|(_, ob_meta)| ob_meta.subscription == *subscription)
+                .find(|(_, ob_meta)| ob_meta.subscription.stream_id() == subscription.stream_id())
                 .map(|(_, ob_meta)| ob_meta.raw_market_data_sender.clone()),
         }
     }
@@ -856,9 +822,7 @@ impl Orchestrator {
     // -------------------------------------------------------
     // BroadcastActor Management
     // -------------------------------------------------------
-    pub async fn create_broadcast_actor(
-        &mut self
-    ) -> String {
+    pub async fn create_broadcast_actor(&mut self) -> String {
         info!("Creating BroadcastActor");
         let actor_id = generate_actor_id("BroadcastActor".to_string());
         let (command_sender, command_receiver) =
@@ -884,7 +848,7 @@ impl Orchestrator {
                 join_handle,
             ),
         );
-        return actor_id;
+        actor_id
     }
 
     pub fn get_broadcast_market_data_sender(
@@ -892,7 +856,7 @@ impl Orchestrator {
         broadcast_actor_id: &str,
     ) -> Result<mpsc::Sender<ProcessedMarketData>, OrchestratorError> {
         match self.broadcast_actors.get(broadcast_actor_id) {
-            Some(metadata) => return Ok(metadata.market_data_sender.clone()),
+            Some(metadata) => Ok(metadata.market_data_sender.clone()),
             None => Err(OrchestratorError::BroastcastActorNotFound {
                 actor_id: broadcast_actor_id.to_string(),
             }),

@@ -1,5 +1,5 @@
 use crate::async_actors::messages::{
-    OrderBookCommand, OrderBookMessage, ProcessedMarketData, ProcessedOrderBookData, RawMarketData
+    OrderBookCommand, OrderBookMessage, ProcessedMarketData, ProcessedOrderBookData, RawMarketData,
 };
 use crate::async_actors::subscription::ExchangeSubscription;
 use ordered_float::OrderedFloat;
@@ -123,7 +123,7 @@ impl DeribitOrderBookActor {
         to_orch: mpsc::Sender<OrderBookMessage>,
         from_orch: mpsc::Receiver<OrderBookCommand>,
         raw_market_data: mpsc::Receiver<RawMarketData>,
-        market_data_sender: mpsc::Sender<ProcessedMarketData>
+        market_data_sender: mpsc::Sender<ProcessedMarketData>,
     ) -> Self {
         Self {
             actor_id,
@@ -260,7 +260,7 @@ impl DeribitOrderBookActor {
     }
 
     fn process_orderbook_change(&mut self, data: RawOrderBookData) -> ProcessMessageResult {
-        if self.waiting_for_snapshot == true {
+        if self.waiting_for_snapshot {
             return ProcessMessageResult::ErrNoResub(OrderBookActorError::UnwantedOrderBookChange);
         }
 
@@ -345,11 +345,10 @@ impl DeribitOrderBookActor {
             bids,
             asks,
         });
-        
+
         self.market_data_sender
             .send(data)
             .await
             .map_err(|_| OrderBookActorError::BroadcastActorTimeout)
-        
     }
 }
