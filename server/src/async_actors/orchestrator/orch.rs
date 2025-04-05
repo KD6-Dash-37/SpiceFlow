@@ -1,24 +1,37 @@
-use super::meta::{BroadcastActorMetadata, OrderBookMetadata, RouterMetadata, WebSocketMetadata};
+// server/src/async_actors/orchestrator/orch.rs
+
+// 🌍 Standard library
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
+
+// 📦 External crates
+use tokio::sync::mpsc;
+use tokio::time::{interval, Duration};
+use tracing::{debug, error, info, warn, Instrument};
+
+
+// 🧠 Internal Crates / Modules
 use crate::async_actors::broadcast::BroadcastActor;
-use crate::async_actors::deribit::orderbook::DeribitOrderBookActor;
-use crate::async_actors::deribit::router::DeribitRouterActor;
-use crate::async_actors::deribit::websocket::DeribitWebSocketActor;
+use crate::async_actors::deribit::{
+    DeribitOrderBookActor,
+    DeribitRouterActor,
+    DeribitWebSocketActor,
+};
 use crate::async_actors::messages::{
     BroadcastActorCommand, BroadcastActorMessage, OrderBookCommand, OrderBookMessage,
     ProcessedMarketData, RawMarketData, RouterCommand, RouterMessage, WebSocketCommand,
     WebSocketMessage,
 };
 use crate::async_actors::orchestrator::tasks::{TaskOutcome, Workflow, WorkflowKind};
-use crate::async_actors::subscription::ExchangeSubscription;
+use crate::domain::ExchangeSubscription;
 use crate::http_api::handle::SubscriptionAction;
 use crate::model::{Exchange, RequestedFeed};
-use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
-use thiserror::Error;
-use tokio::sync::mpsc;
-use tokio::time::{interval, Duration};
-use tracing::{debug, error, info, warn, Instrument};
+
+// 🧩 Local Module
+use super::meta::{BroadcastActorMetadata, OrderBookMetadata, RouterMetadata, WebSocketMetadata};
+use super::errors::OrchestratorError;
+
 // TODO used for actor ID's make more robust later
 static ACTOR_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -30,68 +43,7 @@ const OB_MD_RAW_BUFFER_SIZE: usize = 32;
 const BROADCAST_MESSAGE_BUFFER_SIZE: usize = 32;
 const ZERO_MQ_PORT: u16 = 5556;
 
-#[derive(Debug, Error)]
-pub enum OrchestratorError {
-    // -------------------------------------------------------
-    // Timeout errors
-    // -------------------------------------------------------
-    #[error("❌ RouterActor {actor_id} timed out")]
-    RouterActorTimeout { actor_id: String },
-    #[error("❌ WebSocketActor {actor_id} timed out")]
-    WebSocketActorTimeout { actor_id: String },
-    #[error("❌ OrderBookActor {actor_id} timed out")]
-    OrderBookActorTimeout { actor_id: String },
-    #[error("❌ BroastcastActor {actor_id} timed out")]
-    BroastcastActorTimeout { actor_id: String },
 
-    // -------------------------------------------------------
-    // Channel errors
-    // -------------------------------------------------------
-    #[error("❌ RouterActor {actor_id} ws<>router channel is closed")]
-    RouterActorChannelClosed { actor_id: String },
-    #[error("Could not find the raw_market_data_sender for {stream_id} while subscribing RouterActor {router_actor_id}")]
-    RawDataChannelMissing {
-        stream_id: String,
-        router_actor_id: String,
-    },
-    #[error("❌ Channel closed")]
-    ChannelClosed,
-
-    // -------------------------------------------------------
-    // Cannot find actor by type
-    // -------------------------------------------------------
-    #[error("❌ RouterActor not found")]
-    RouterActorMissing,
-    #[error("❌ WebSocketActor not found")]
-    WebSocketActorMissing,
-    #[error("❌ OrderBookActor not found")]
-    OrderBookActorMissing,
-    #[error("❌ BroadcastActor not found")]
-    BroadcastActorMissing,
-
-    // -------------------------------------------------------
-    // Cannot find actor by ID
-    // -------------------------------------------------------
-    #[error("❌ WebSocketActor: {actor_id} not found")]
-    WebSocketNotFound { actor_id: String },
-    #[error("❌ RouterActor: {actor_id} not found")]
-    RouterNotFound { actor_id: String },
-    #[error("❌ OrderBookActor: {actor_id} not found")]
-    OrderBookNotFound { actor_id: String },
-    #[error("❌ BroastcastActor: {actor_id} not found")]
-    BroastcastActorNotFound { actor_id: String },
-
-    // -------------------------------------------------------
-    // Subscription errors
-    // -------------------------------------------------------
-    #[error("❌ Subscription: {stream_id} not found")]
-    ExistingSubscriptionNotFound { stream_id: String },
-    #[error("❌ UnsupportedFeedType: {feed_type}")]
-    UnsupportedFeedType { feed_type: String },
-
-    #[error("❌ {reason}")]
-    TaskLogicError { reason: String },
-}
 
 pub struct Orchestrator {
     pub websockets: HashMap<String, WebSocketMetadata>,

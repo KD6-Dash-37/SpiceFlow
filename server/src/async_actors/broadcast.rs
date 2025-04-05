@@ -1,10 +1,6 @@
-use crate::async_actors::messages::Topic;
-use crate::async_actors::messages::{
-    BroadcastActorCommand, BroadcastActorMessage, ProcessedMarketData, ProcessedOrderBookData,
-};
-use crate::templates::order_book_generated::{
-    OrderBook, OrderBookArgs, PriceLevel, PriceLevelArgs,
-};
+// server/src/async_actors/broadcast.rs
+
+// 📦 External Crates
 use flatbuffers::{FlatBufferBuilder, WIPOffset};
 use futures_util::lock::Mutex;
 use thiserror::Error;
@@ -12,6 +8,16 @@ use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 use tracing::{error, info, warn, Instrument};
 use zmq;
+
+// 🧠 Internal Crates / Modules
+use crate::async_actors::messages::{
+    BroadcastActorCommand, BroadcastActorMessage, ProcessedMarketData, ProcessedOrderBookData,
+    Topic,
+};
+use crate::templates::order_book_generated::{
+    OrderBook, OrderBookArgs, PriceLevel, PriceLevelArgs,
+};
+
 pub trait ZmqSocketInterface {
     fn send(&self, data: &[u8], flags: i32) -> Result<(), String>;
 }

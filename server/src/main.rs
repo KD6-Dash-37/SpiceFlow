@@ -1,11 +1,16 @@
-// New Framework (In Development!)
+// 🌍 Standard library
+use std::sync::Arc;
+
+// 📦 External crates
 use dotenv::dotenv;
-use server::async_actors::orchestrator::Orchestrator;
-use server::http_api::handle::SubscriptionAction;
-use server::http_api::start_http_server;
-use server::http_api::OrchestratorHandle;
 use tokio::{signal, sync::mpsc};
 use tracing::info;
+
+// 🧠 Internal modules
+use server::async_actors::orchestrator::Orchestrator;
+use server::domain::RefDataService;
+use server::http_api::{handle::SubscriptionAction, start_http_server, OrchestratorHandle};
+
 
 #[tokio::main]
 async fn main() {
@@ -18,8 +23,6 @@ async fn main() {
     // Logging configuration
     tracing_subscriber::fmt::init();
 
-    // Create a channel for the dummy gRPC requests
-    // let (dummy_grpc_sender, dummy_grpc_receiver) = mpsc::channel::<DummyRequest>(32);
     let (request_sender, request_receiver) = mpsc::channel::<SubscriptionAction>(32);
     // Initialise the orchestrator with the dummy gRPC receiver
     let orchestrator = Orchestrator::new(request_receiver);
@@ -29,10 +32,11 @@ async fn main() {
         orchestrator.run().await;
     });
 
-    let http_handle = OrchestratorHandle::new(request_sender);
+    let orchestrator_handle = OrchestratorHandle::new(request_sender);
+    let ref_data = Arc::new(RefDataService::with_all_providers());
 
     tokio::spawn(async move {
-        start_http_server(http_handle).await;
+        start_http_server(orchestrator_handle, ref_data).await;
     });
 
     info!("🌱 System started. Press Ctrl+C to shut down.");
