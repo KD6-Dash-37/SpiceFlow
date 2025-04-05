@@ -1,3 +1,5 @@
+// server/src/domain/subscription/mod.rs
+
 use crate::model::{Exchange, RequestedFeed};
 
 pub type ExchangeSubscription = Box<dyn SubscriptionInfo>;

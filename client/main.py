@@ -5,9 +5,9 @@ from spiceflow_client.order_book import deserialise_and_print
 def subscribe_to_stream() -> None:
     url = "http://localhost:3000/subscribe"
     payload = {
-        "base_currency": "BTC",
-        "quote_currency": "USD",
-        "instrument_type": "InvFut",
+        "base_currency": "SOL",
+        "quote_currency": "USDC",
+        "instrument_type": "LinPerp",
         "exchange": "Deribit",
         "requested_feed": "OrderBook"
     }
@@ -26,9 +26,9 @@ def subscribe_to_stream() -> None:
 def unsubscribe_to_stream() -> None:
     url = "http://localhost:3000/unsubscribe"
     payload = {
-        "base_currency": "BTC",
-        "quote_currency": "USD",
-        "instrument_type": "InvFut",
+        "base_currency": "SOL",
+        "quote_currency": "USDC",
+        "instrument_type": "LinPerp",
         "exchange": "Deribit",
         "requested_feed": "OrderBook"
     }

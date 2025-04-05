@@ -1,6 +1,11 @@
-use crate::async_actors::orchestrator::orch::OrchestratorError;
-use crate::async_actors::subscription::ExchangeSubscription;
+// server/src/http_api/handle.rs
+
+// 📦 External crates
 use tokio::sync::mpsc;
+
+// 🧠 Internal modules
+use crate::async_actors::orchestrator::errors::OrchestratorError;
+use crate::domain::ExchangeSubscription;
 
 #[derive(Debug, Clone)]
 pub enum SubscriptionAction {

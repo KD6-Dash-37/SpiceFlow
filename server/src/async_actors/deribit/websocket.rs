@@ -1,8 +1,10 @@
-use crate::async_actors::messages::{ExchangeMessage, WebSocketCommand, WebSocketMessage};
-use crate::async_actors::subscription::ExchangeSubscription;
-// Type alias for WebSocket stream
-type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+// server/src/async_actors/deribit/websocket.rs
 
+// 🧠 Internal Crates / Modules
+use crate::async_actors::messages::{ExchangeMessage, WebSocketCommand, WebSocketMessage};
+use crate::domain::ExchangeSubscription;
+
+// 📦 External Crates
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use futures_util::SinkExt;
 use once_cell::sync::Lazy;
@@ -15,6 +17,10 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
 };
 use tracing::{debug, error, info, warn, Instrument};
+
+// 🔧 Type Definitions
+type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
 
 const WEBSOCKET_HEARTBEAT_INTERVAL: u64 = 5;
 const WEBSOCKET_STAY_ALIVE_INTERVAL: u64 = 5;

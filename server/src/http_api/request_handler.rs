@@ -1,5 +1,11 @@
-use crate::http_api::handle::{OrchestratorHandle, SubscriptionAction};
-use crate::http_api::mock_ref_data::resolve_subscription;
+// server/src/http_api/request_handler.rs
+
+// 🌍 Standard library
+use std::fmt;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+// 📦 External crates
 use axum::{
     extract::State,
     http::StatusCode,
@@ -9,11 +15,15 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::net::SocketAddr;
 use tokio::net::TcpListener;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-#[derive(Debug, Deserialize)]
+// 🧠 Internal modules (grouped and alphabetized by crate)
+use crate::domain::ref_data::{ExchangeRefDataProvider, RefDataService};
+use crate::domain::subscription::ExchangeSubscription;
+use crate::http_api::handle::{OrchestratorHandle, SubscriptionAction};
+
+#[derive(Clone, Debug, Deserialize)]
 pub struct SubscriptionRequest {
     pub base_currency: String,
     pub quote_currency: String,
@@ -22,11 +32,39 @@ pub struct SubscriptionRequest {
     pub requested_feed: String,
 }
 
-pub async fn start_http_server(handle: OrchestratorHandle) {
+impl fmt::Display for SubscriptionRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}.{} -> {}",
+            self.exchange,
+            self.instrument_type,
+            self.base_currency,
+            self.quote_currency,
+            self.requested_feed
+        )
+    }
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    pub orchestrator_handle: OrchestratorHandle,
+    pub ref_data: Arc<RefDataService>,
+}
+
+pub async fn start_http_server(
+    orchestrator_handle: OrchestratorHandle,
+    ref_data: Arc<RefDataService>,
+) {
+    let state = AppState {
+        orchestrator_handle,
+        ref_data,
+    };
     let app = Router::new()
         .route("/subscribe", post(subscribe_handler))
         .route("/unsubscribe", post(unsubscribe_handler))
-        .with_state(handle);
+        .with_state(state);
+
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     let listener = TcpListener::bind(addr)
         .await
@@ -36,66 +74,41 @@ pub async fn start_http_server(handle: OrchestratorHandle) {
 }
 
 pub async fn subscribe_handler(
-    State(handle): State<OrchestratorHandle>,
+    State(state): State<AppState>,
     Json(request): Json<SubscriptionRequest>,
 ) -> Response {
-    match resolve_subscription(&request) {
-        Some(sub) => {
-            let stream_id = sub.stream_id().to_string();
-            let action = SubscriptionAction::Subscribe(sub);
-            if let Err(e) = handle.send(action).await {
-                error!(
-                    "❌ Failed to send SubscriptionAction::Subscribe to orchestrator: {:?}",
-                    e
-                );
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": "Failed to process request" })),
-                )
-                    .into_response();
-            }
-
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "status": "ok",
-                    "stream_id": stream_id
-                })),
-            )
-                .into_response()
-        }
-        None => {
-            warn!("❌ Invalid subscribe request: {:?}", request);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": "Invalid subscription parameters",
-                })),
-            )
-                .into_response()
-        }
-    }
+    handle_subscription_action(&state, request, SubscriptionAction::Subscribe).await
 }
 
 pub async fn unsubscribe_handler(
-    State(handle): State<OrchestratorHandle>,
+    State(state): State<AppState>,
     Json(request): Json<SubscriptionRequest>,
 ) -> Response {
-    match resolve_subscription(&request) {
-        Some(sub) => {
-            let stream_id = sub.stream_id().to_string();
-            let action = SubscriptionAction::Unsubscribe(sub);
-            if let Err(e) = handle.send(action).await {
-                error!(
-                    "❌ Failed to send SubscriptionAction::Unsubscribe to orchestrator: {:?}",
-                    e
-                );
+    handle_subscription_action(&state, request, SubscriptionAction::Unsubscribe).await
+}
+
+async fn handle_subscription_action(
+    state: &AppState,
+    request: SubscriptionRequest,
+    action_builder: impl FnOnce(ExchangeSubscription) -> SubscriptionAction,
+) -> Response {
+    match state.ref_data.resolve_request(&request).await {
+        Ok(subscription) => {
+            let stream_id = subscription.stream_id().to_string();
+            let action = action_builder(subscription);
+
+            if let Err(e) = state.orchestrator_handle.send(action).await {
+                error!("❌ Failed to send {} to orchestrator: {:?}", request, e);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": "Failed to process unsubscribe request"})),
+                    Json(json!({
+                        "error": "Failed to process request",
+                        "request": request.to_string(),
+                    })),
                 )
                     .into_response();
             }
+
             (
                 StatusCode::OK,
                 Json(json!({
@@ -105,15 +118,11 @@ pub async fn unsubscribe_handler(
             )
                 .into_response()
         }
-        None => {
-            warn!("❌ Invalid unsubscribe request: {:?}", request);
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": "Invalid unsubscribe parameters",
-                })),
-            )
-                .into_response()
-        }
+
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response(),
     }
 }

@@ -1,17 +1,25 @@
-use crate::async_actors::messages::{
-    OrderBookCommand, OrderBookMessage, ProcessedMarketData, ProcessedOrderBookData, RawMarketData,
-};
-use crate::async_actors::subscription::ExchangeSubscription;
+// server/src/async_actors/deribit/orderbook.rs
+
+// 🌍 Standard library
+use std::collections::BTreeMap;
+use std::fmt;
+
+// 📦 External Crates
 use ordered_float::OrderedFloat;
 use serde;
 use serde::Deserialize;
 use serde_tuple::Deserialize_tuple;
-use std::collections::BTreeMap;
-use std::fmt;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 use tracing::{error, info, warn, Instrument};
+
+// 🧠 Internal Crates / Modules
+use crate::async_actors::messages::{
+    OrderBookCommand, OrderBookMessage, ProcessedMarketData, ProcessedOrderBookData, RawMarketData,
+};
+use crate::domain::ExchangeSubscription;
+
 
 const ORDERBOOK_HEARTBEAT_INTERVAL: u64 = 5;
 
