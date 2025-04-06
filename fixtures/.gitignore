@@ -1,0 +1,5 @@
+# Ignore all fixture files by default
+*
+
+# Allow this file itself
+!.gitignore

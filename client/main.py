@@ -6,9 +6,9 @@ def subscribe_to_stream() -> None:
     url = "http://localhost:3000/subscribe"
     payload = {
         "base_currency": "SOL",
-        "quote_currency": "USDC",
-        "instrument_type": "LinPerp",
-        "exchange": "Deribit",
+        "quote_currency": "USDT",
+        "instrument_type": "Spot",
+        "exchange": "Binance",
         "requested_feed": "OrderBook"
     }
     try:
@@ -27,9 +27,9 @@ def unsubscribe_to_stream() -> None:
     url = "http://localhost:3000/unsubscribe"
     payload = {
         "base_currency": "SOL",
-        "quote_currency": "USDC",
-        "instrument_type": "LinPerp",
-        "exchange": "Deribit",
+        "quote_currency": "USDT",
+        "instrument_type": "Spot",
+        "exchange": "Binance",
         "requested_feed": "OrderBook"
     }
     try:

@@ -5,3 +5,4 @@ pub mod domain;
 pub mod http_api;
 pub mod model;
 pub mod templates;
+pub mod devtools;

@@ -18,7 +18,7 @@ use serde_json::json;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
-// 🧠 Internal modules (grouped and alphabetized by crate)
+// 🧠 Internal moduless
 use crate::domain::ref_data::{ExchangeRefDataProvider, RefDataService};
 use crate::domain::subscription::ExchangeSubscription;
 use crate::http_api::handle::{OrchestratorHandle, SubscriptionAction};
@@ -94,6 +94,7 @@ async fn handle_subscription_action(
 ) -> Response {
     match state.ref_data.resolve_request(&request).await {
         Ok(subscription) => {
+            info!("✅ Resolved subscription: {:?}", subscription);
             let stream_id = subscription.stream_id().to_string();
             let action = action_builder(subscription);
 

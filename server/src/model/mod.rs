@@ -6,6 +6,7 @@ use std::str::FromStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Exchange {
     Deribit,
+    Binance,
 }
 
 impl std::str::FromStr for Exchange {
@@ -13,6 +14,7 @@ impl std::str::FromStr for Exchange {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "deribit" => Ok(Exchange::Deribit),
+            "binance" => Ok(Exchange::Binance),
             _ => Err("Unknown or unsupported exchange"),
         }
     }
@@ -22,6 +24,7 @@ impl std::fmt::Display for Exchange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Exchange::Deribit => "Deribit",
+            Exchange::Binance => "Binance",
         };
         write!(f, "{}", s)
     }
@@ -95,19 +98,5 @@ impl fmt::Display for InstrumentType {
             InstrumentType::LinPerp => "LinPerp",
         };
         write!(f, "{}", s)
-    }
-}
-
-impl InstrumentType {
-    pub fn as_exchange_type(&self, exchange: &Exchange) -> Option<&'static str> {
-        match exchange {
-            Exchange::Deribit => match self {
-                InstrumentType::InvFut
-                | InstrumentType::LinFut
-                | InstrumentType::InvPerp
-                | InstrumentType::LinPerp => Some("future"),
-                InstrumentType::Spot => Some("spot"),
-            },
-        }
     }
 }
