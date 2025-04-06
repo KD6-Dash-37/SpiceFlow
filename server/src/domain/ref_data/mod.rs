@@ -8,26 +8,30 @@ use async_trait;
 
 // 🧠 Internal modules
 mod deribit;
+mod binance;
+mod instruments;
 pub mod types;
 
+use instruments::ExchangeInstruments;
 use crate::domain::ref_data::types::RefDataError;
 use crate::domain::ExchangeSubscription;
 use crate::http_api::SubscriptionRequest;
 use crate::model::Exchange; // Prefer explicit path here for clarity
 
 use deribit::DeribitRefData;
+use binance::BinanceRefData;
 
 #[async_trait::async_trait]
 pub trait ExchangeRefDataProvider: Send + Sync {
     async fn fetch_instruments(
         &self,
         request: &SubscriptionRequest,
-    ) -> Result<Vec<serde_json::Value>, RefDataError>;
+    ) -> Result<ExchangeInstruments, RefDataError>;
 
     fn match_instrument(
         &self,
         request: &SubscriptionRequest,
-        instruments: &[serde_json::Value],
+        instruments: &ExchangeInstruments,
     ) -> Result<Option<serde_json::Value>, RefDataError>;
 
     fn build_subscription(
@@ -51,7 +55,7 @@ impl ExchangeRefDataProvider for RefDataService {
     async fn fetch_instruments(
         &self,
         request: &SubscriptionRequest,
-    ) -> Result<Vec<serde_json::Value>, RefDataError> {
+    ) -> Result<ExchangeInstruments, RefDataError> {
         let exchange = Exchange::from_str(&request.exchange)
             .map_err(|_| RefDataError::InvalidExchange(request.exchange.clone()))?;
 
@@ -65,7 +69,7 @@ impl ExchangeRefDataProvider for RefDataService {
     fn match_instrument(
         &self,
         request: &SubscriptionRequest,
-        instruments: &[serde_json::Value],
+        instruments: &ExchangeInstruments,
     ) -> Result<Option<serde_json::Value>, RefDataError> {
         let exchange = Exchange::from_str(&request.exchange)
             .map_err(|_| RefDataError::InvalidExchange(request.exchange.clone()))?;
@@ -109,8 +113,13 @@ impl ExchangeRefDataProvider for RefDataService {
 impl RefDataService {
     pub fn with_all_providers() -> Self {
         let mut providers: HashMap<Exchange, Arc<dyn ExchangeRefDataProvider>> = HashMap::new();
+        
         let deribit = Arc::new(DeribitRefData::new());
+        let binance = Arc::new(BinanceRefData::new());
+        
         providers.insert(Exchange::Deribit, deribit);
+        providers.insert(Exchange::Binance, binance);
+        
         Self { providers }
     }
 }

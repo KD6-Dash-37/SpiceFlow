@@ -1,5 +1,6 @@
 // server/src/domain/ref_data/types.rs
 
+// 🧠 Internal modules
 use crate::model::{Exchange, InstrumentType};
 
 #[derive(Debug, Clone)]
@@ -31,6 +32,8 @@ pub enum RefDataError {
     InvalidFeed(String),
     #[error("Instrument not found for request: {0}")]
     InstrumentNotFound(String),
+    #[error("Request: {request}, expected: {expected}")]
+    InstrumentMismatch { request: String, expected: String}
 }
 
 #[derive(Debug, thiserror::Error)]

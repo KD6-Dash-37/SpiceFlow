@@ -5,11 +5,13 @@ use std::str::FromStr;
 
 // 📦 External crates
 use async_trait;
+use serde::Deserialize;
 use tracing::debug;
 use url::Url;
 
 // 🧠 Internal modules
 use super::types::RefDataError;
+use super::instruments::{DeribitInstrument, ExchangeInstruments};
 use crate::domain::ref_data::ExchangeRefDataProvider;
 use crate::domain::{DeribitSubscription, ExchangeSubscription};
 use crate::http_api::SubscriptionRequest;
@@ -21,6 +23,12 @@ const KIND_SPOT: &str = "spot";
 const TYPE_REVERSED: &str = "reversed";
 const TYPE_LINEAR: &str = "linear";
 const SETTLEMENT_PERPETUAL: &str = "perpetual";
+
+
+#[derive(Debug, Deserialize)]
+struct DeribitGetInstrumentsResponse {
+    result: Vec<DeribitInstrument>,
+}
 
 pub struct DeribitRefData {
     client: reqwest::Client,
@@ -39,14 +47,12 @@ impl ExchangeRefDataProvider for DeribitRefData {
     async fn fetch_instruments(
         &self,
         request: &SubscriptionRequest,
-    ) -> Result<Vec<serde_json::Value>, RefDataError> {
+    ) -> Result<ExchangeInstruments, RefDataError> {
         let instrument_type = InstrumentType::from_str(&request.instrument_type).map_err(|_| {
             RefDataError::InvalidInstrumentType(request.instrument_type.to_string())
         })?;
 
-        let kind = instrument_type
-            .as_exchange_type(&Exchange::Deribit)
-            .ok_or(RefDataError::UnsupportedInstrumentType(instrument_type))?;
+        let kind = instrument_type_to_deribit_kind(&instrument_type);
 
         let mut url = Url::parse("https://www.deribit.com/api/v2/public/get_instruments")
             .expect("Invalid base URL");
@@ -68,41 +74,46 @@ impl ExchangeRefDataProvider for DeribitRefData {
             .await
             .map_err(|e| RefDataError::HttpError(e.to_string()))?;
 
-        let body = response
-            .json::<serde_json::Value>()
+        let data = response
+            .json::<DeribitGetInstrumentsResponse>()
             .await
             .map_err(|e| RefDataError::HttpError(e.to_string()))?;
 
-        let instruments = body
-            .get("result")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .ok_or_else(|| RefDataError::ParseError("response.result not found".to_string()))?;
-        Ok(instruments)
+        Ok(ExchangeInstruments::Deribit(data.result))
     }
 
     fn match_instrument(
         &self,
         request: &SubscriptionRequest,
-        instruments: &[serde_json::Value],
+        instruments: &ExchangeInstruments,
     ) -> Result<Option<serde_json::Value>, RefDataError> {
+        let ExchangeInstruments::Deribit(typed) = instruments else {
+            return Err(RefDataError::InstrumentMismatch {
+                request: request.to_string(),
+                expected: "Deribit".into()
+            });
+        };
+        
         let instrument_type = InstrumentType::from_str(&request.instrument_type)
             .map_err(|_| RefDataError::InvalidInstrumentType(request.instrument_type.clone()))?;
 
-        let mut matched_instruments = instruments
+        let filtered_instruments = typed
             .iter()
             .filter(|instr| is_deribit_match(instr, request, instrument_type));
-
-        match (matched_instruments.next(), matched_instruments.next()) {
-            (None, _) => Ok(None),
-            (Some(first), None) => Ok(Some(first.clone())),
-            (Some(_), Some(_)) => {
-                let remaining = matched_instruments.count();
-                Err(RefDataError::MultipleInstrumentMatches {
-                    request: request.to_string(),
-                    count: 2 + remaining,
-                })
+        
+        let matched_instruments: Vec<_> = filtered_instruments.collect();
+        
+        match matched_instruments.len() {
+            0 => Ok(None),
+            1 => {
+                let value = serde_json::to_value(matched_instruments[0])
+                    .map_err(|_| RefDataError::ParseError("Failed to serialize BinanceSymbol".into()))?;
+                Ok(Some(value))
             }
+            n => Err(RefDataError::MultipleInstrumentMatches {
+                request: request.to_string(),
+                count: n,
+            }),
         }
     }
 
@@ -155,46 +166,47 @@ impl ExchangeRefDataProvider for DeribitRefData {
     }
 }
 
+fn instrument_type_to_deribit_kind(instrument_type: &InstrumentType) -> &'static str {
+    match instrument_type {
+        InstrumentType::InvFut
+        | InstrumentType::LinFut
+        | InstrumentType::InvPerp
+        | InstrumentType::LinPerp => "future",
+        InstrumentType::Spot => "spot"
+    }
+}
+
+
 fn is_deribit_match(
-    instrument: &serde_json::Value,
+    instrument: &DeribitInstrument,
     request: &SubscriptionRequest,
     instrument_type: InstrumentType,
 ) -> bool {
-    let base = instrument.get("base_currency").and_then(|v| v.as_str());
-    let quote = instrument.get("quote_currency").and_then(|v| v.as_str());
-    let kind = instrument.get("kind").and_then(|v| v.as_str());
-    let instr_type = instrument.get("instrument_type").and_then(|v| v.as_str());
-    let settlement_period = instrument.get("settlement_period").and_then(|v| v.as_str());
-
-    let (base, quote, kind, instr_type) = match (base, quote, kind, instr_type) {
-        (Some(b), Some(q), Some(k), Some(i)) => (b, q, k, i),
-        _ => return false,
-    };
-    if base != request.base_currency || quote != request.quote_currency {
+    if instrument.base_currency != request.base_currency || instrument.quote_currency != request.quote_currency {
         return false;
     }
 
     match instrument_type {
-        InstrumentType::Spot => kind == KIND_SPOT,
+        InstrumentType::Spot => instrument.kind == KIND_SPOT,
         InstrumentType::InvPerp => {
-            kind == KIND_FUTURE
-                && instr_type == TYPE_REVERSED
-                && settlement_period == Some(SETTLEMENT_PERPETUAL)
+            instrument.kind == KIND_FUTURE &&
+            instrument.instrument_type == Some(TYPE_REVERSED.to_string()) &&
+            instrument.settlement_period.as_deref() == Some(SETTLEMENT_PERPETUAL)
         }
         InstrumentType::LinPerp => {
-            kind == KIND_FUTURE
-                && instr_type == TYPE_LINEAR
-                && settlement_period == Some(SETTLEMENT_PERPETUAL)
+            instrument.kind == KIND_FUTURE &&
+            instrument.instrument_type == Some(TYPE_LINEAR.to_string()) &&
+            instrument.settlement_period.as_deref() == Some(SETTLEMENT_PERPETUAL)
         }
         InstrumentType::InvFut => {
-            kind == KIND_FUTURE
-                && instr_type == TYPE_REVERSED
-                && settlement_period != Some(SETTLEMENT_PERPETUAL)
+            instrument.kind == KIND_FUTURE &&
+            instrument.instrument_type == Some(TYPE_REVERSED.to_string()) &&
+            instrument.settlement_period.as_deref() != Some(SETTLEMENT_PERPETUAL)
         }
         InstrumentType::LinFut => {
-            kind == KIND_FUTURE
-                && instr_type == TYPE_LINEAR
-                && settlement_period != Some(SETTLEMENT_PERPETUAL)
+            instrument.kind == KIND_FUTURE &&
+            instrument.instrument_type == Some(TYPE_LINEAR.to_string()) &&
+            instrument.settlement_period.as_deref() != Some(SETTLEMENT_PERPETUAL)
         }
     }
 }
@@ -216,13 +228,17 @@ async fn deribit_fetch_instruments_fields_exist() {
         .await
         .expect("Should fetch instruments");
 
+    let ExchangeInstruments::Deribit(list) = instruments else {
+        panic!("Expected Deribit instruments");
+    };
+
     assert!(
-        instruments.iter().any(|instr| {
-            instr.get("instrument_name").is_some()
-                && instr.get("kind").is_some()
-                && instr.get("base_currency").is_some()
-                && instr.get("quote_currency").is_some()
-                && instr.get("instrument_type").is_some()
+        list.iter().any(|instr| {
+            !instr.instrument_name.is_empty()
+                && !instr.kind.is_empty()
+                && !instr.base_currency.is_empty()
+                && !instr.quote_currency.is_empty()
+                && instr.instrument_type.is_some()
         }),
         "Expected at least one instrument with required fields"
     );
@@ -255,9 +271,14 @@ async fn deribit_should_match_btc_inverse_perp() {
     );
 
     let instrument = matched.unwrap();
-    let exchange_symbol = instrument.get("instrument_name").unwrap().as_str().unwrap();
+    let exchange_symbol = instrument
+        .get("instrument_name")
+        .unwrap()
+        .as_str()
+        .unwrap();
     assert_eq!(exchange_symbol, "BTC-PERPETUAL");
 }
+
 
 #[tokio::test]
 async fn deribit_subscription_roundtrip_success() {
@@ -279,3 +300,4 @@ async fn deribit_subscription_roundtrip_success() {
     assert_eq!(subscription.exchange_symbol(), "BTC-PERPETUAL");
     assert!(subscription.stream_id().contains("BTC"));
 }
+
