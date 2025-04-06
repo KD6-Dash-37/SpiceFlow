@@ -26,12 +26,8 @@ pub enum RouterParseError {
     MissingField(String),
     #[error("Unknown channel: {0}")]
     UnknownChannel(String),
-    #[error("Failed to send parsed message")]
-    FailToSendParsedMessage(String),
     #[error("Message type from Websocket must be valid text or binary")]
     InvalidMessageType,
-    #[error("Field found but invalid type: {0}")]
-    InvalidType(serde_json::Value),
     #[error("Unknown subscription management ID, message: {0}")]
     InvalidSubscriptionManagementMessage(serde_json::Value),
 }
@@ -282,13 +278,13 @@ impl DeribitRouterActor {
         };
 
         let market_data = RawMarketData {
-            stream_id: subscription.stream_id().to_string(),
+            stream_id: subscription.stream_id.clone(),
             data,
         };
 
-        match subscription.feed_type() {
+        match subscription.requested_feed {
             RequestedFeed::OrderBook => {
-                if let Some(sender) = self.to_data_processor.get_mut(subscription.stream_id()) {
+                if let Some(sender) = self.to_data_processor.get_mut(&subscription.stream_id) {
                     match sender.send(market_data).await {
                         Ok(_) => {}
                         Err(e) => {
@@ -306,8 +302,8 @@ impl DeribitRouterActor {
                 subscription,
                 raw_market_data_sender,
             } => {
-                let exchange_stream_id = subscription.exchange_stream_id().to_string();
-                let stream_id = subscription.stream_id().to_string();
+                let exchange_stream_id = subscription.exchange_stream_id.clone();
+                let stream_id = subscription.stream_id.clone();
 
                 match self.registered_streams.entry(exchange_stream_id) {
                     std::collections::hash_map::Entry::Vacant(e) => {
@@ -323,17 +319,17 @@ impl DeribitRouterActor {
                 }
             }
             RouterCommand::Remove { subscription } => {
-                let exchange_stream_id = subscription.exchange_stream_id().to_string();
+                let exchange_stream_id = subscription.exchange_stream_id;
                 if self
                     .registered_streams
                     .remove(&exchange_stream_id)
                     .is_some()
                 {
-                    debug!("Removed subscription: {}", subscription.stream_id());
+                    debug!("Removed subscription: {}", subscription.stream_id);
                 } else {
                     warn!(
                         "Tried to remove non-existent subscription: {}",
-                        subscription.stream_id()
+                        subscription.stream_id
                     );
                 }
             }

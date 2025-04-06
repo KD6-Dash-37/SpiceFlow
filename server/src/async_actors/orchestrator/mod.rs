@@ -1,7 +1,8 @@
 // server/src/async_actors/orchestrator/mod.rs
 
-pub mod errors;
-pub mod meta;
-pub mod orch;
-pub mod tasks;
+mod errors;
+mod meta;
+mod orch;
+mod tasks;
 pub use orch::Orchestrator;
+pub use errors::OrchestratorError;

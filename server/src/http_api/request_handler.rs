@@ -84,7 +84,7 @@ async fn handle_subscription_action(
     match state.ref_data.resolve_request(&request).await {
         Ok(subscription) => {
             info!("✅ Resolved subscription: {:?}", subscription);
-            let stream_id = subscription.stream_id().to_string();
+            let stream_id = subscription.stream_id.clone();
             let action = action_builder(subscription);
 
             if let Err(e) = state.orchestrator_handle.send(action).await {

@@ -102,7 +102,7 @@ pub struct RawOrderBookData {
     #[serde(rename = "type")]
     pub msg_type: OrderBookMessageType,
     pub timestamp: u64,
-    pub instrument_name: String,
+    // pub instrument_name: String,
     pub change_id: u64,
     pub bids: Vec<RawOrderBookEntry>,
     pub asks: Vec<RawOrderBookEntry>,
@@ -151,7 +151,7 @@ impl DeribitOrderBookActor {
         let span: tracing::Span = tracing::info_span!(
             "DeribitOrderBookActor",
             actor_id = %self.actor_id,
-            stream_id = %self.subscription.stream_id(),
+            stream_id = %self.subscription.stream_id,
         );
 
         async move {
@@ -347,7 +347,7 @@ impl DeribitOrderBookActor {
             .collect();
 
         let data = ProcessedMarketData::OrderBook(ProcessedOrderBookData {
-            stream_id: self.subscription.stream_id().to_string(),
+            stream_id: self.subscription.stream_id.clone(),
             exchange_timestamp: self.exchange_timestamp.unwrap_or(0),
             bids,
             asks,

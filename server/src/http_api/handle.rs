@@ -4,7 +4,7 @@
 use tokio::sync::mpsc;
 
 // 🧠 Internal modules
-use crate::async_actors::orchestrator::errors::OrchestratorError;
+use crate::async_actors::orchestrator::OrchestratorError;
 use crate::domain::ExchangeSubscription;
 
 #[derive(Debug, Clone)]
