@@ -1,4 +1,27 @@
-# SpiceFlow
+# 🔮 SpiceFlow
+
+**SpiceFlow** is a real-time, multi-venue market data system built in Rust. It orchestrates WebSocket connections to crypto exchanges like **Deribit** and **Binance**, managing subscriptions to market data feeds such as order books.
+
+The system is powered by a modular, actor-based architecture — separating concerns like:
+- Reference data fetching
+- WebSocket orchestration
+- Order book management
+- Broadcasting of processed data
+
+It’s designed for high performance, scalability, and observability, with an emphasis on reliability and support for rapid multi-exchange expansion.
+
+---
+
+## 🚀 Features
+
+- 📡 WebSocket streaming from multiple exchanges
+- ⚙️ Modular actor-based orchestration system
+- 🧮 Real-time order book construction
+- 📤 ZeroMQ broadcasting layer
+- 🧪 Offline fixtures for dev/testing
+- 🔍 Tracing instrumentation
+
+---
 
 
 ### 🧪 Dev Fixtures

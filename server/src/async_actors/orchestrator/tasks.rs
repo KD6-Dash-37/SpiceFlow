@@ -7,10 +7,12 @@ use std::fmt;
 use tracing::info;
 
 // 🧠 Internal Crates / Modules
-use super::errors::OrchestratorError;
-use crate::async_actors::orchestrator::orch::Orchestrator;
 use crate::domain::ExchangeSubscription;
 use crate::model::Exchange;
+
+// 🧩 Local Module
+use super::errors::OrchestratorError;
+use super::orch::Orchestrator;
 
 pub enum WorkflowKind {
     Subscribe,
@@ -34,12 +36,7 @@ pub struct Workflow {
 
 impl fmt::Display for Workflow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}Workflow [{}]",
-            self.kind,
-            self.subscription.stream_id()
-        )
+        write!(f, "{}Workflow [{}]", self.kind, self.subscription.stream_id)
     }
 }
 
@@ -63,7 +60,7 @@ impl Workflow {
                     subscription: self.subscription.clone(),
                 }),
                 3 => Some(OrchestratorTask::CreateRouterIfNeeded {
-                    exchange: self.subscription.exchange(),
+                    exchange: self.subscription.exchange,
                 }),
                 4 => Some(OrchestratorTask::SubscribeRouter {
                     subscription: self.subscription.clone(),
@@ -126,12 +123,12 @@ impl fmt::Display for OrchestratorTask {
             OrchestratorTask::CreateOrderBook { subscription } => write!(
                 f,
                 "OrchestratorTask::Unsubscribe {}",
-                subscription.stream_id()
+                subscription.stream_id
             ),
             OrchestratorTask::OrderBookCreated { subscription } => write!(
                 f,
                 "OrchestratorTask::OrderBookCreated {}",
-                subscription.stream_id()
+                subscription.stream_id
             ),
             OrchestratorTask::CreateRouterIfNeeded { exchange } => {
                 write!(f, "OrchestratorTask::CreateRouterIfNeeded {}", exchange)
@@ -142,32 +139,32 @@ impl fmt::Display for OrchestratorTask {
             OrchestratorTask::SubscribeRouter { subscription } => write!(
                 f,
                 "OrchestratorTask::SubscribeRouter {}",
-                subscription.stream_id()
+                subscription.stream_id
             ),
             OrchestratorTask::SubscribeWebSocket { subscription } => write!(
                 f,
                 "OrchestratorTask::SubscribeWebSocket {}",
-                subscription.stream_id()
+                subscription.stream_id
             ),
             OrchestratorTask::WebSocketSubscribed { subscription } => write!(
                 f,
                 "OrchestratorTask::WebSocketSubscribed {}",
-                subscription.stream_id()
+                subscription.stream_id
             ),
             OrchestratorTask::UnsubscribeWebSocket { subscription } => write!(
                 f,
                 "OrchestratorTask::UnsubscribeWebSocket {}",
-                subscription.stream_id()
+                subscription.stream_id
             ),
             OrchestratorTask::UnsubscribeRouter { subscription } => write!(
                 f,
                 "OrchestratorTask::UnsubscribeRouter {}",
-                subscription.stream_id()
+                subscription.stream_id
             ),
             OrchestratorTask::TeardownOrderBook { subscription } => write!(
                 f,
                 "OrchestratorTask::TeardownOrderBook {}",
-                subscription.stream_id()
+                subscription.stream_id
             ),
         }
     }
@@ -221,13 +218,13 @@ impl OrchestratorTask {
                 match orch
                     .orderbooks
                     .values()
-                    .find(|meta| meta.subscription.stream_id() == subscription.stream_id())
+                    .find(|meta| meta.subscription.stream_id == subscription.stream_id)
                 {
                     Some(meta) => {
                         if meta.is_ready() {
                             info!(
                                 "✅ Completed OrchestratorTask::CreateOrderBook for {}",
-                                subscription.stream_id()
+                                subscription.stream_id
                             );
                             TaskOutcome::Complete
                         } else {
@@ -254,7 +251,7 @@ impl OrchestratorTask {
                 let router_actor_id = match orch
                     .routers
                     .iter()
-                    .find(|(_, meta)| meta.exchange == subscription.exchange())
+                    .find(|(_, meta)| meta.exchange == subscription.exchange)
                     .map(|(id, _)| id.clone())
                 {
                     Some(id) => id,
@@ -274,7 +271,7 @@ impl OrchestratorTask {
                         let router_actor_id = match orch
                             .routers
                             .iter()
-                            .find(|(_, meta)| meta.exchange == subscription.exchange())
+                            .find(|(_, meta)| meta.exchange == subscription.exchange)
                             .map(|(id, _)| id.clone())
                         {
                             Some(id) => id,
@@ -284,7 +281,7 @@ impl OrchestratorTask {
                         };
 
                         match orch
-                            .create_websocket_actor(&subscription.exchange(), &router_actor_id)
+                            .create_websocket_actor(&subscription.exchange, &router_actor_id)
                             .await
                         {
                             Ok(new_id) => new_id,
@@ -305,7 +302,7 @@ impl OrchestratorTask {
             OrchestratorTask::WebSocketSubscribed { subscription } => {
                 match orch.websockets.iter().find(|(_actor_id, meta)| {
                     meta.subscribed_streams
-                        .contains_key(subscription.stream_id())
+                        .contains_key(&subscription.stream_id)
                 }) {
                     Some(_) => TaskOutcome::Complete,
                     None => TaskOutcome::Pending,
@@ -318,7 +315,7 @@ impl OrchestratorTask {
                     .values()
                     .find(|meta| {
                         meta.subscribed_streams
-                            .contains_key(subscription.stream_id())
+                            .contains_key(&subscription.stream_id)
                     })
                     .map(|meta| meta.actor_id.clone())
                 {
@@ -337,7 +334,7 @@ impl OrchestratorTask {
                     .values()
                     .find(|meta| {
                         meta.subscribed_streams
-                            .contains_key(subscription.stream_id())
+                            .contains_key(&subscription.stream_id)
                     })
                     .map(|meta| meta.actor_id.clone())
                 {
@@ -357,7 +354,7 @@ impl OrchestratorTask {
                 let orderbook_actor_id = match orch
                     .orderbooks
                     .iter()
-                    .find(|(_, meta)| meta.subscription.stream_id() == subscription.stream_id())
+                    .find(|(_, meta)| meta.subscription.stream_id == subscription.stream_id)
                     .map(|(key, _)| key.clone())
                 {
                     Some(id) => id,

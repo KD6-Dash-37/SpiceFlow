@@ -22,7 +22,7 @@ use crate::async_actors::messages::{
 };
 use crate::async_actors::orchestrator::tasks::{TaskOutcome, Workflow, WorkflowKind};
 use crate::domain::ExchangeSubscription;
-use crate::http_api::handle::SubscriptionAction;
+use crate::http_api::SubscriptionAction;
 use crate::model::{Exchange, RequestedFeed};
 
 // 🧩 Local Module
@@ -204,7 +204,7 @@ impl Orchestrator {
             OrderBookMessage::Resubscribe { subscription } => {
                 info!(
                     "Received resubscribe request for {}",
-                    subscription.stream_id()
+                    subscription.stream_id
                 );
                 if let Err(e) = self.resubscribe_websocket(&subscription).await {
                     error!("Resubsribing WebSocketActor failed {:?}", e);
@@ -248,27 +248,27 @@ impl Orchestrator {
         let requested_subscription = ws_meta
             .requested_streams
             .values()
-            .find(|sub| sub.exchange_symbol() == exchange_symbol && sub.feed_type() == feed_type)
+            .find(|sub| sub.exchange_symbol == exchange_symbol && sub.requested_feed == feed_type)
             .cloned();
 
         match requested_subscription {
             Some(subscription) => {
-                ws_meta.requested_streams.remove(subscription.stream_id());
+                let stream_id = subscription.stream_id.clone();
+                ws_meta.requested_streams.remove(&subscription.stream_id);
                 debug!(
                     "Confirmed Subscribe for: {} from actor: {}",
-                    subscription.stream_id(),
-                    ws_actor_id
+                    subscription.stream_id, ws_actor_id
                 );
                 ws_meta
                     .subscribed_streams
-                    .insert(subscription.stream_id().to_string(), subscription.clone());
+                    .insert(stream_id.clone(), subscription.clone());
                 debug!(
                     "Subscribe confirmation updated in Router: {} metadata",
                     router_meta.actor_id
                 );
                 router_meta
                     .subscribed_streams
-                    .insert(subscription.stream_id().to_string(), subscription.clone());
+                    .insert(stream_id.clone(), subscription.clone());
             }
             None => {
                 warn!(
@@ -295,27 +295,27 @@ impl Orchestrator {
         let stopped_subscription = ws_meta
             .subscribed_streams
             .values()
-            .find(|sub| sub.exchange_symbol() == exchange_symbol && sub.feed_type() == feed_type)
+            .find(|sub| sub.exchange_symbol == exchange_symbol && sub.requested_feed == feed_type)
             .cloned();
 
         match stopped_subscription {
             Some(subscription) => {
+                let stream_id = subscription.stream_id.clone();
                 // ✅ 3️⃣ Remove from `subscribed_streams`
                 if ws_meta
                     .subscribed_streams
-                    .remove(subscription.stream_id())
+                    .remove(&subscription.stream_id)
                     .is_none()
                 {
                     warn!(
                         "⚠️ Tried to remove subscription {} from WebSocketMetadata for actor {}, but it wasn't found in subscribed_streams",
-                        subscription.stream_id(), ws_actor_id
+                        stream_id, ws_actor_id
                     );
                     return;
                 }
                 debug!(
                     "✅ Confirmed Unsubscribe for {} from actor: {}",
-                    subscription.stream_id(),
-                    ws_actor_id
+                    subscription.stream_id, ws_actor_id
                 );
             }
             None => {
@@ -398,7 +398,7 @@ impl Orchestrator {
         router_actor_id: &str,
         subscription: &ExchangeSubscription,
     ) -> Result<(), OrchestratorError> {
-        let stream_id = subscription.stream_id();
+        let stream_id = subscription.stream_id.clone();
         debug!(
             "Fetching router metadata for: {} to register subscription",
             router_actor_id
@@ -413,7 +413,7 @@ impl Orchestrator {
                 Some(sender) => sender,
                 None => {
                     return Err(OrchestratorError::RawDataChannelMissing {
-                        stream_id: subscription.stream_id().to_string(),
+                        stream_id: stream_id.clone(),
                         router_actor_id: router_actor_id.to_string(),
                     })
                 }
@@ -421,7 +421,7 @@ impl Orchestrator {
 
         debug!(
             "Registering subscription {} with router {}",
-            stream_id, router_actor_id
+            subscription.stream_id, router_actor_id
         );
         if let Err(e) = router
             .router_command_sender
@@ -433,7 +433,7 @@ impl Orchestrator {
         {
             error!(
                 "❌ Failed to send RouterCommand::Register for {} to Router {}: {}",
-                stream_id, router.actor_id, e
+                subscription.stream_id, router.actor_id, e
             );
             return Err(OrchestratorError::RouterActorTimeout {
                 actor_id: router.actor_id.clone(),
@@ -441,7 +441,7 @@ impl Orchestrator {
         }
         debug!(
             "✅ Successfully registered subscription {} with Router {}",
-            stream_id, router.actor_id
+            subscription.stream_id, router.actor_id
         );
         Ok(())
     }
@@ -453,7 +453,7 @@ impl Orchestrator {
     ) -> Result<(), OrchestratorError> {
         info!(
             "Attempting to unsubscribe {} on RouterActor",
-            subscription.stream_id()
+            subscription.stream_id
         );
 
         let Some(router_metadata) = self.routers.get_mut(router_actor_id) else {
@@ -474,22 +474,20 @@ impl Orchestrator {
 
         if router_metadata
             .subscribed_streams
-            .remove(subscription.stream_id())
+            .remove(&subscription.stream_id)
             .is_some()
         {
             info!(
                 "Removed {} from RouterActor: {} metadata.subscribed_streams",
-                subscription.stream_id(),
-                router_actor_id
+                subscription.stream_id, router_actor_id
             );
         } else {
             warn!(
                 "Could not find {} in RouterActor: {} metadata.subscribed_streams",
-                subscription.stream_id(),
-                router_actor_id
+                subscription.stream_id, router_actor_id
             );
             return Err(OrchestratorError::ExistingSubscriptionNotFound {
-                stream_id: subscription.stream_id().to_string(),
+                stream_id: subscription.stream_id.clone(),
             });
         }
         Ok(())
@@ -585,7 +583,7 @@ impl Orchestrator {
         ws_actor_id: &str,
         subscription: ExchangeSubscription,
     ) -> Result<(), OrchestratorError> {
-        let stream_id = subscription.stream_id();
+        let stream_id = subscription.stream_id.clone();
         debug!(
             "Attempting to subscribe {} on WebSocketActor: {}",
             stream_id, ws_actor_id
@@ -609,7 +607,7 @@ impl Orchestrator {
         debug!("Requested subscription of {stream_id} from WebSocketActor: {ws_actor_id}");
         ws_meta
             .requested_streams
-            .insert(subscription.stream_id().to_string(), subscription);
+            .insert(stream_id.clone(), subscription);
         Ok(())
     }
 
@@ -618,14 +616,16 @@ impl Orchestrator {
         ws_actor_id: &str,
         subscription: ExchangeSubscription,
     ) -> Result<(), OrchestratorError> {
-        let stream_id = subscription.stream_id();
         debug!(
             "Attempting to subscribe {} on WebSocketActor: {}",
-            stream_id, ws_actor_id
+            subscription.stream_id, ws_actor_id
         );
 
         let Some(ws_meta) = self.websockets.get_mut(ws_actor_id) else {
-            error!("WebsocketActor: {ws_actor_id} not found when subscribing {stream_id}");
+            error!(
+                "WebsocketActor: {ws_actor_id} not found when subscribing {}",
+                subscription.stream_id
+            );
             return Err(OrchestratorError::WebSocketNotFound {
                 actor_id: ws_actor_id.to_string(),
             });
@@ -639,7 +639,10 @@ impl Orchestrator {
                 actor_id: ws_actor_id.to_string(),
             })?;
 
-        debug!("Requested WebSocketActor: {ws_actor_id} to subscribe to {stream_id}");
+        debug!(
+            "Requested WebSocketActor: {ws_actor_id} to subscribe to {}",
+            subscription.stream_id
+        );
 
         Ok(())
     }
@@ -653,7 +656,7 @@ impl Orchestrator {
             .values()
             .find(|meta| {
                 meta.subscribed_streams
-                    .contains_key(subscription.stream_id())
+                    .contains_key(&subscription.stream_id)
             })
             .ok_or(OrchestratorError::WebSocketActorMissing)?;
         metadata
@@ -677,7 +680,7 @@ impl Orchestrator {
     ) -> Result<String, OrchestratorError> {
         info!(
             "Creating OrderBookActor for {}",
-            subscription.exchange_stream_id()
+            subscription.exchange_stream_id
         );
         let actor_id = generate_actor_id("OrderBookActor".to_string());
         let (command_sender, command_receiver) = mpsc::channel::<OrderBookCommand>(32);
@@ -725,17 +728,16 @@ impl Orchestrator {
     ) -> Result<(), OrchestratorError> {
         info!(
             "Sending command to teardown OrderBookActor: {} for {}",
-            orderbook_actor_id,
-            subscription.stream_id()
+            orderbook_actor_id, subscription.stream_id
         );
         let Some(metadata) = self.orderbooks.get_mut(orderbook_actor_id) else {
             return Err(OrchestratorError::OrderBookNotFound {
                 actor_id: orderbook_actor_id.to_string(),
             });
         };
-        if metadata.subscription.stream_id() != subscription.stream_id() {
+        if metadata.subscription.stream_id != subscription.stream_id {
             return Err(OrchestratorError::ExistingSubscriptionNotFound {
-                stream_id: subscription.stream_id().to_string(),
+                stream_id: subscription.stream_id.clone(),
             });
         }
         metadata
@@ -753,11 +755,11 @@ impl Orchestrator {
         &self,
         subscription: &ExchangeSubscription,
     ) -> Option<mpsc::Sender<RawMarketData>> {
-        match subscription.feed_type() {
+        match subscription.requested_feed {
             RequestedFeed::OrderBook => self
                 .orderbooks
                 .iter()
-                .find(|(_, ob_meta)| ob_meta.subscription.stream_id() == subscription.stream_id())
+                .find(|(_, ob_meta)| ob_meta.subscription.stream_id == subscription.stream_id)
                 .map(|(_, ob_meta)| ob_meta.raw_market_data_sender.clone()),
         }
     }

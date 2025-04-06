@@ -10,7 +10,7 @@ use url::Url;
 use super::types::RefDataError;
 use crate::domain::instrument::{DeribitInstrument, ExchangeInstruments, Instrument};
 use crate::domain::ref_data::ExchangeRefDataProvider;
-use crate::domain::{DeribitSubscription, ExchangeSubscription};
+use crate::domain::ExchangeSubscription;
 use crate::http_api::SubscriptionRequest;
 use crate::model::InstrumentType;
 
@@ -112,12 +112,12 @@ impl ExchangeRefDataProvider for DeribitRefData {
         let internal_symbol = instrument.to_internal_symbol();
         let exchange_symbol = instrument.exchange_symbol.clone();
 
-        Ok(ExchangeSubscription::from(DeribitSubscription::new(
+        Ok(ExchangeSubscription::new(
             internal_symbol,
             exchange_symbol,
             request.requested_feed,
             instrument.exchange,
-        )))
+        ))
     }
 
     async fn resolve_request(
@@ -218,7 +218,7 @@ mod tests {
             .await
             .expect("resolve_request should succeed");
 
-        assert_eq!(subscription.exchange_symbol(), "BTC-PERPETUAL");
-        assert!(subscription.stream_id().contains("BTC"));
+        assert_eq!(subscription.exchange_symbol, "BTC-PERPETUAL");
+        assert!(subscription.stream_id.contains("BTC"));
     }
 }
