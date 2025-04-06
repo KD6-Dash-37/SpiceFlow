@@ -3,7 +3,6 @@
 // 🌍 Standard library
 use std::fmt;
 
-
 // 📦 External Crates
 use ordered_float::OrderedFloat;
 use tokio::sync::mpsc;
@@ -12,7 +11,6 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 // 🧠 Internal Crates / Modules
 use crate::domain::ExchangeSubscription;
 use crate::model::RequestedFeed;
-
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum WebSocketMessage {

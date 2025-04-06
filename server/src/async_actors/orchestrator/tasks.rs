@@ -7,11 +7,10 @@ use std::fmt;
 use tracing::info;
 
 // 🧠 Internal Crates / Modules
+use super::errors::OrchestratorError;
 use crate::async_actors::orchestrator::orch::Orchestrator;
 use crate::domain::ExchangeSubscription;
 use crate::model::Exchange;
-use super::errors::OrchestratorError;
-
 
 pub enum WorkflowKind {
     Subscribe,

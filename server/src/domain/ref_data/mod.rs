@@ -1,25 +1,24 @@
 // server/src/domain/ref_data/mod.rs
 
 // 📦 External crates
-use std::collections::HashMap;
-use std::str::FromStr;
-use std::sync::Arc;
 use async_trait;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 // 🧠 Internal modules
-mod deribit;
 mod binance;
-mod instruments;
+mod deribit;
 pub mod types;
 
-use instruments::ExchangeInstruments;
+use crate::domain::instrument::ExchangeInstruments;
+use crate::domain::instrument::Instrument;
 use crate::domain::ref_data::types::RefDataError;
 use crate::domain::ExchangeSubscription;
 use crate::http_api::SubscriptionRequest;
-use crate::model::Exchange; // Prefer explicit path here for clarity
+use crate::model::Exchange;
 
-use deribit::DeribitRefData;
 use binance::BinanceRefData;
+use deribit::DeribitRefData;
 
 #[async_trait::async_trait]
 pub trait ExchangeRefDataProvider: Send + Sync {
@@ -32,12 +31,12 @@ pub trait ExchangeRefDataProvider: Send + Sync {
         &self,
         request: &SubscriptionRequest,
         instruments: &ExchangeInstruments,
-    ) -> Result<Option<serde_json::Value>, RefDataError>;
+    ) -> Result<Option<Instrument>, RefDataError>;
 
     fn build_subscription(
         &self,
         request: &SubscriptionRequest,
-        instrument: &serde_json::Value,
+        instrument: &Instrument,
     ) -> Result<ExchangeSubscription, RefDataError>;
 
     async fn resolve_request(
@@ -56,13 +55,10 @@ impl ExchangeRefDataProvider for RefDataService {
         &self,
         request: &SubscriptionRequest,
     ) -> Result<ExchangeInstruments, RefDataError> {
-        let exchange = Exchange::from_str(&request.exchange)
-            .map_err(|_| RefDataError::InvalidExchange(request.exchange.clone()))?;
-
         let provider = self
             .providers
-            .get(&exchange)
-            .ok_or(RefDataError::MissingProvider(exchange))?;
+            .get(&request.exchange)
+            .ok_or(RefDataError::MissingProvider(request.exchange))?;
         provider.fetch_instruments(request).await
     }
 
@@ -70,28 +66,23 @@ impl ExchangeRefDataProvider for RefDataService {
         &self,
         request: &SubscriptionRequest,
         instruments: &ExchangeInstruments,
-    ) -> Result<Option<serde_json::Value>, RefDataError> {
-        let exchange = Exchange::from_str(&request.exchange)
-            .map_err(|_| RefDataError::InvalidExchange(request.exchange.clone()))?;
+    ) -> Result<Option<Instrument>, RefDataError> {
         let provider = self
             .providers
-            .get(&exchange)
-            .ok_or(RefDataError::MissingProvider(exchange))?;
+            .get(&request.exchange)
+            .ok_or(RefDataError::MissingProvider(request.exchange))?;
         provider.match_instrument(request, instruments)
     }
 
     fn build_subscription(
         &self,
         request: &SubscriptionRequest,
-        instrument: &serde_json::Value,
+        instrument: &Instrument,
     ) -> Result<ExchangeSubscription, RefDataError> {
-        let exchange = Exchange::from_str(&request.exchange)
-            .map_err(|_| RefDataError::InvalidExchange(request.exchange.clone()))?;
-
         let provider = self
             .providers
-            .get(&exchange)
-            .ok_or(RefDataError::MissingProvider(exchange))?;
+            .get(&request.exchange)
+            .ok_or(RefDataError::MissingProvider(request.exchange))?;
         provider.build_subscription(request, instrument)
     }
 
@@ -99,13 +90,10 @@ impl ExchangeRefDataProvider for RefDataService {
         &self,
         request: &SubscriptionRequest,
     ) -> Result<ExchangeSubscription, RefDataError> {
-        let exchange = Exchange::from_str(&request.exchange)
-            .map_err(|_| RefDataError::InvalidExchange(request.exchange.clone()))?;
-
         let provider = self
             .providers
-            .get(&exchange)
-            .ok_or(RefDataError::MissingProvider(exchange))?;
+            .get(&request.exchange)
+            .ok_or(RefDataError::MissingProvider(request.exchange))?;
         provider.resolve_request(request).await
     }
 }
@@ -113,13 +101,13 @@ impl ExchangeRefDataProvider for RefDataService {
 impl RefDataService {
     pub fn with_all_providers() -> Self {
         let mut providers: HashMap<Exchange, Arc<dyn ExchangeRefDataProvider>> = HashMap::new();
-        
+
         let deribit = Arc::new(DeribitRefData::new());
         let binance = Arc::new(BinanceRefData::new());
-        
+
         providers.insert(Exchange::Deribit, deribit);
         providers.insert(Exchange::Binance, binance);
-        
+
         Self { providers }
     }
 }

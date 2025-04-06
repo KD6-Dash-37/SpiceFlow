@@ -11,7 +11,6 @@ use server::async_actors::orchestrator::Orchestrator;
 use server::domain::RefDataService;
 use server::http_api::{handle::SubscriptionAction, start_http_server, OrchestratorHandle};
 
-
 #[tokio::main]
 async fn main() {
     dotenv().ok();

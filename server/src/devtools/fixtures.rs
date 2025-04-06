@@ -8,7 +8,6 @@ use std::path::PathBuf;
 // 🧠 Internal modules
 use crate::model::InstrumentType;
 
-
 /// Loads a raw JSON fixture as a string from the `fixtures/` directory.
 pub fn load_json_fixture(filename: &str) -> String {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -16,7 +15,7 @@ pub fn load_json_fixture(filename: &str) -> String {
     path.pop();
     path.push("fixtures");
     path.push(filename);
-    
+
     fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("❌ Failed to read fixture file '{}': {}", path.display(), e))
 }

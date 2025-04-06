@@ -20,7 +20,6 @@ use crate::async_actors::messages::{
 };
 use crate::domain::ExchangeSubscription;
 
-
 const ORDERBOOK_HEARTBEAT_INTERVAL: u64 = 5;
 
 #[derive(Debug, Error)]

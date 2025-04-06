@@ -33,7 +33,7 @@ pub enum RefDataError {
     #[error("Instrument not found for request: {0}")]
     InstrumentNotFound(String),
     #[error("Request: {request}, expected: {expected}")]
-    InstrumentMismatch { request: String, expected: String}
+    InstrumentMismatch { request: String, expected: String },
 }
 
 #[derive(Debug, thiserror::Error)]
