@@ -1,7 +1,6 @@
 // server/src/http_api/request_handler.rs
 
 // 🌍 Standard library
-use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -13,7 +12,6 @@ use axum::{
     routing::post,
     serve, Json, Router,
 };
-use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tracing::{error, info};
@@ -23,28 +21,7 @@ use crate::domain::ref_data::{ExchangeRefDataProvider, RefDataService};
 use crate::domain::subscription::ExchangeSubscription;
 use crate::http_api::handle::{OrchestratorHandle, SubscriptionAction};
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct SubscriptionRequest {
-    pub base_currency: String,
-    pub quote_currency: String,
-    pub instrument_type: String,
-    pub exchange: String,
-    pub requested_feed: String,
-}
-
-impl fmt::Display for SubscriptionRequest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}.{}.{}.{} -> {}",
-            self.exchange,
-            self.instrument_type,
-            self.base_currency,
-            self.quote_currency,
-            self.requested_feed
-        )
-    }
-}
+use super::requests::{RawSubscriptionRequest, SubscriptionRequest};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -75,23 +52,35 @@ pub async fn start_http_server(
 
 pub async fn subscribe_handler(
     State(state): State<AppState>,
-    Json(request): Json<SubscriptionRequest>,
+    Json(raw): Json<RawSubscriptionRequest>,
 ) -> Response {
-    handle_subscription_action(&state, request, SubscriptionAction::Subscribe).await
+    handle_subscription_action(&state, raw, SubscriptionAction::Subscribe).await
 }
 
 pub async fn unsubscribe_handler(
     State(state): State<AppState>,
-    Json(request): Json<SubscriptionRequest>,
+    Json(raw): Json<RawSubscriptionRequest>,
 ) -> Response {
-    handle_subscription_action(&state, request, SubscriptionAction::Unsubscribe).await
+    handle_subscription_action(&state, raw, SubscriptionAction::Unsubscribe).await
 }
 
 async fn handle_subscription_action(
     state: &AppState,
-    request: SubscriptionRequest,
+    raw: RawSubscriptionRequest,
     action_builder: impl FnOnce(ExchangeSubscription) -> SubscriptionAction,
 ) -> Response {
+    let request = match SubscriptionRequest::try_from(raw) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("❌ Invalid request: {}", e);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
     match state.ref_data.resolve_request(&request).await {
         Ok(subscription) => {
             info!("✅ Resolved subscription: {:?}", subscription);

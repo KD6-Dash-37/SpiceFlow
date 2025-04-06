@@ -21,7 +21,6 @@ use tracing::{debug, error, info, warn, Instrument};
 // 🔧 Type Definitions
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-
 const WEBSOCKET_HEARTBEAT_INTERVAL: u64 = 5;
 const WEBSOCKET_STAY_ALIVE_INTERVAL: u64 = 5;
 const DEFAULT_JSONRPC: &str = "2.0";
