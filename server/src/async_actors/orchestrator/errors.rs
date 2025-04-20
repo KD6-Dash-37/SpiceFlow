@@ -3,6 +3,8 @@
 // 📦 External crates
 use thiserror::Error;
 
+use crate::model::Exchange;
+
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
     // -------------------------------------------------------
@@ -61,6 +63,8 @@ pub enum OrchestratorError {
     ExistingSubscriptionNotFound { stream_id: String },
     #[error("❌ UnsupportedFeedType: {feed_type}")]
     UnsupportedFeedType { feed_type: String },
+    #[error("❌ Unsupportedexchange: {exchange}")]
+    UnsupportedExchange {exchange: Exchange},
 
     #[error("❌ {reason}")]
     TaskLogicError { reason: String },

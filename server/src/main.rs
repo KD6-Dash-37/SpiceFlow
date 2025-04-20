@@ -9,7 +9,7 @@ use tracing::info;
 // 🧠 Internal modules
 use server::async_actors::orchestrator::Orchestrator;
 use server::domain::RefDataService;
-use server::http_api::{SubscriptionAction, start_http_server, OrchestratorHandle};
+use server::http_api::{SubscriptionAction, start_http_server, OrchHandle};
 
 #[tokio::main]
 async fn main() {
@@ -31,7 +31,7 @@ async fn main() {
         orchestrator.run().await;
     });
 
-    let orchestrator_handle = OrchestratorHandle::new(request_sender);
+    let orchestrator_handle = OrchHandle::new(request_sender);
     let ref_data = Arc::new(RefDataService::with_all_providers());
 
     tokio::spawn(async move {
@@ -41,7 +41,7 @@ async fn main() {
     info!("🌱 System started. Press Ctrl+C to shut down.");
 
     if let Err(err) = signal::ctrl_c().await {
-        eprintln!("❌ Failed to listen for Ctrl+C: {}", err);
+        eprintln!("❌ Failed to listen for Ctrl+C: {err}");
     }
     info!("🛑 Received shutdown signal, exiting.");
 }

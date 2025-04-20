@@ -15,6 +15,7 @@ pub struct ExchangeSubscription {
 }
 
 impl ExchangeSubscription {
+    #[must_use]
     pub fn new(
         internal_symbol: String,
         exchange_symbol: String,
@@ -25,7 +26,7 @@ impl ExchangeSubscription {
             Exchange::Deribit => deribit_stream_id(&exchange_symbol, requested_feed),
             Exchange::Binance => binance_stream_id(&exchange_symbol, requested_feed),
         };
-        let stream_id = format!("{}.{}", internal_symbol, requested_feed);
+        let stream_id = format!("{internal_symbol}.{requested_feed}");
         Self {
             internal_symbol,
             exchange_symbol,
@@ -39,12 +40,12 @@ impl ExchangeSubscription {
 
 fn deribit_stream_id(exchange_symbol: &str, requested_feed: RequestedFeed) -> String {
     match requested_feed {
-        RequestedFeed::OrderBook => format!("book.{}.100ms", &exchange_symbol),
+        RequestedFeed::OrderBook => format!("book.{exchange_symbol}.100ms"),
     }
 }
 
 fn binance_stream_id(exchange_symbol: &str, requested_feed: RequestedFeed) -> String {
     match requested_feed {
-        RequestedFeed::OrderBook => format!("book.{}.100ms", &exchange_symbol),
+        RequestedFeed::OrderBook => format!("{}@depth@100ms", exchange_symbol.to_lowercase()),
     }
 }

@@ -176,7 +176,7 @@ impl DeribitOrderBookActor {
                     }
 
                     Some(raw) = self.raw_market_data.recv() => {
-                        match self.process_market_data(raw).await {
+                        match self.process_market_data(raw) {
                             ProcessMessageResult::Ok => {
                                 if let Err(e) = self.send_processed_data().await {
                                     error!("{}", e)
@@ -201,7 +201,7 @@ impl DeribitOrderBookActor {
         .await
     }
 
-    async fn send_hearbeat(&mut self) -> bool {
+    async fn send_hearbeat(&self) -> bool {
         match self
             .to_orch
             .send(OrderBookMessage::Heartbeat {
@@ -220,7 +220,7 @@ impl DeribitOrderBookActor {
         }
     }
 
-    async fn process_market_data(&mut self, raw: RawMarketData) -> ProcessMessageResult {
+    fn process_market_data(&mut self, raw: RawMarketData) -> ProcessMessageResult {
         let parsed: RawOrderBookData = match serde_json::from_value(raw.data) {
             Ok(data) => data,
             Err(e) => {
@@ -235,6 +235,7 @@ impl DeribitOrderBookActor {
     }
 
     fn process_orderbook_snapshot(&mut self, data: RawOrderBookData) -> ProcessMessageResult {
+        self.exchange_timestamp = Some(data.timestamp);
         for side in &[OrderBookSide::Bids, OrderBookSide::Asks] {
             let map = side.get_map(self);
             map.clear();
@@ -278,6 +279,7 @@ impl DeribitOrderBookActor {
             );
             return ProcessMessageResult::ErrRequiresResub(err);
         }
+        self.exchange_timestamp = Some(data.timestamp);
         for side in &[OrderBookSide::Bids, OrderBookSide::Asks] {
             let map = side.get_map(self);
             let updates = match side {
@@ -332,7 +334,7 @@ impl DeribitOrderBookActor {
         Ok(())
     }
 
-    async fn send_processed_data(&mut self) -> Result<(), OrderBookActorError> {
+    async fn send_processed_data(&self) -> Result<(), OrderBookActorError> {
         let bids: Vec<(OrderedFloat<f64>, f64)> = self
             .bids
             .iter()

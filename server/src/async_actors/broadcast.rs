@@ -145,7 +145,7 @@ impl BroadcastActor {
         .await
     }
 
-    async fn send_heartbeat(&mut self) -> bool {
+    async fn send_heartbeat(&self) -> bool {
         match self
             .to_orch
             .send(BroadcastActorMessage::Heartbeat {

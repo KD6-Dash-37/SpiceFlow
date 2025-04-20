@@ -31,6 +31,7 @@ pub struct BinanceSymbol {
 }
 
 impl BinanceSymbol {
+    #[must_use]
     pub fn infer_type(&self, source: &BinanceInstrumentSource) -> Option<InstrumentType> {
         match source {
             BinanceInstrumentSource::Spot => Some(InstrumentType::Spot),
@@ -47,6 +48,7 @@ impl BinanceSymbol {
         }
     }
 
+    #[must_use]
     pub fn to_instrument(&self, source: &BinanceInstrumentSource) -> Option<Instrument> {
         let instrument_type = self.infer_type(source)?;
         Some(Instrument {
