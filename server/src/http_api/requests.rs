@@ -44,13 +44,13 @@ impl TryFrom<RawSubscriptionRequest> for SubscriptionRequest {
 
     fn try_from(req: RawSubscriptionRequest) -> Result<Self, Self::Error> {
         let instrument_type = InstrumentType::from_str(&req.instrument_type)
-            .map_err(|_| SubscriptionError::InstrumentType(req.instrument_type))?;
+            .map_err(|()| SubscriptionError::InstrumentType(req.instrument_type))?;
 
         let exchange = Exchange::from_str(&req.exchange)
             .map_err(|_| SubscriptionError::Exchange(req.exchange))?;
 
         let requested_feed = RequestedFeed::from_str(&req.requested_feed)
-            .map_err(|_| SubscriptionError::Feed(req.requested_feed))?;
+            .map_err(|()| SubscriptionError::Feed(req.requested_feed))?;
 
         Ok(Self {
             base: req.base.to_uppercase(),

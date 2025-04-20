@@ -133,7 +133,7 @@ impl ExchangeRefDataProvider for DeribitRefData {
     }
 }
 
-fn instrument_type_to_deribit_kind(instrument_type: &InstrumentType) -> &'static str {
+const fn instrument_type_to_deribit_kind(instrument_type: &InstrumentType) -> &'static str {
     match instrument_type {
         InstrumentType::InvFut
         | InstrumentType::LinFut

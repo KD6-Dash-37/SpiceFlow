@@ -13,8 +13,8 @@ impl std::str::FromStr for Exchange {
     type Err = &'static str;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "deribit" => Ok(Exchange::Deribit),
-            "binance" => Ok(Exchange::Binance),
+            "deribit" => Ok(Self::Deribit),
+            "binance" => Ok(Self::Binance),
             _ => Err("Unknown or unsupported exchange"),
         }
     }
@@ -23,10 +23,10 @@ impl std::str::FromStr for Exchange {
 impl std::fmt::Display for Exchange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            Exchange::Deribit => "Deribit",
-            Exchange::Binance => "Binance",
+            Self::Deribit => "Deribit",
+            Self::Binance => "Binance",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -40,7 +40,7 @@ impl FromStr for RequestedFeed {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "orderbook" => Ok(RequestedFeed::OrderBook),
+            "orderbook" => Ok(Self::OrderBook),
             _ => Err(()),
         }
     }
@@ -49,16 +49,17 @@ impl FromStr for RequestedFeed {
 impl fmt::Display for RequestedFeed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            RequestedFeed::OrderBook => "OrderBook",
+            Self::OrderBook => "OrderBook",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
 impl RequestedFeed {
+    #[must_use]
     pub fn from_exchange_str(feed_str: &str) -> Option<Self> {
         match feed_str {
-            "book" => Some(RequestedFeed::OrderBook),
+            "book" => Some(Self::OrderBook),
             _ => None,
         }
     }
@@ -78,11 +79,11 @@ impl FromStr for InstrumentType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "spot" => Ok(InstrumentType::Spot),
-            "invfut" => Ok(InstrumentType::InvFut),
-            "linfut" => Ok(InstrumentType::LinFut),
-            "invperp" => Ok(InstrumentType::InvPerp),
-            "linperp" => Ok(InstrumentType::LinPerp),
+            "spot" => Ok(Self::Spot),
+            "invfut" => Ok(Self::InvFut),
+            "linfut" => Ok(Self::LinFut),
+            "invperp" => Ok(Self::InvPerp),
+            "linperp" => Ok(Self::LinPerp),
             _ => Err(()),
         }
     }
@@ -91,12 +92,12 @@ impl FromStr for InstrumentType {
 impl fmt::Display for InstrumentType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            InstrumentType::Spot => "Spot",
-            InstrumentType::InvFut => "InvFut",
-            InstrumentType::LinFut => "LinFut",
-            InstrumentType::InvPerp => "InvPerp",
-            InstrumentType::LinPerp => "LinPerp",
+            Self::Spot => "Spot",
+            Self::InvFut => "InvFut",
+            Self::LinFut => "LinFut",
+            Self::InvPerp => "InvPerp",
+            Self::LinPerp => "LinPerp",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }

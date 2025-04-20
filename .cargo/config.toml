@@ -1,0 +1,2 @@
+[alias]
+ws-only=["run", "-p", "server", "--features", "dev-ws-only,dev-fixtures"]

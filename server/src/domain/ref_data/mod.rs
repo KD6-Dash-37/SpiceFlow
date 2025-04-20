@@ -99,6 +99,7 @@ impl ExchangeRefDataProvider for RefDataService {
 }
 
 impl RefDataService {
+    #[must_use]
     pub fn with_all_providers() -> Self {
         let mut providers: HashMap<Exchange, Arc<dyn ExchangeRefDataProvider>> = HashMap::new();
 

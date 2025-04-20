@@ -1,8 +1,5 @@
 // server/src/async_actors/messages.rs
 
-// 🌍 Standard library
-use std::fmt;
-
 // 📦 External Crates
 use ordered_float::OrderedFloat;
 use tokio::sync::mpsc;
@@ -12,26 +9,6 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use crate::domain::ExchangeSubscription;
 use crate::model::RequestedFeed;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum WebSocketMessage {
-    Heartbeat { actor_id: String },
-    Disconnected { actor_id: String },
-    Shutdown { actor_id: String },
-}
-
-impl fmt::Display for WebSocketMessage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WebSocketMessage::Heartbeat { actor_id } => write!(f, "Heartbeat from {}", actor_id),
-            WebSocketMessage::Disconnected { actor_id } => {
-                write!(f, "Disconnected from {}", actor_id)
-            }
-            WebSocketMessage::Shutdown { actor_id } => {
-                write!(f, "Shutdown signal from {}", actor_id)
-            }
-        }
-    }
-}
 
 #[derive(Debug)]
 pub enum WebSocketCommand {

@@ -23,6 +23,7 @@ pub struct Instrument {
 impl TryFrom<DeribitInstrument> for Instrument {
     type Error = String;
 
+    #[must_use]
     fn try_from(instr: DeribitInstrument) -> Result<Self, Self::Error> {
         let instrument_type = instr.infer_type().ok_or_else(|| {
             format!(
@@ -30,7 +31,7 @@ impl TryFrom<DeribitInstrument> for Instrument {
                 instr.instrument_name
             )
         })?;
-        Ok(Instrument {
+        Ok( Self {
             exchange: Exchange::Deribit,
             exchange_symbol: instr.instrument_name,
             base: instr.base_currency,

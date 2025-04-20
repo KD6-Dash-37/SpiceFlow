@@ -17,6 +17,10 @@ use super::orch::Orchestrator;
 pub enum WorkflowKind {
     Subscribe,
     Unsubscribe,
+    #[cfg(feature = "dev-ws-only")]
+    WebSocketOnlySubscribe,
+    #[cfg(feature = "dev-ws-only")]
+    WebSocketOnlyUnsubscribe
 }
 
 impl fmt::Display for WorkflowKind {
@@ -24,6 +28,10 @@ impl fmt::Display for WorkflowKind {
         match self {
             WorkflowKind::Subscribe => write!(f, "Subscribe"),
             WorkflowKind::Unsubscribe => write!(f, "Unsubscribe"),
+            #[cfg(feature = "dev-ws-only")]
+            WorkflowKind::WebSocketOnlySubscribe => write!(f, "DEV-WebSocketOnlySubscribe"),
+            #[cfg(feature = "dev-ws-only")]
+            WorkflowKind::WebSocketOnlyUnsubscribe => write!(f, "DEV-WebSocketOnlyUnsubscribe"),
         }
     }
 }
@@ -85,6 +93,23 @@ impl Workflow {
                 }),
                 _ => None,
             },
+            #[cfg(feature = "dev-ws-only")]
+            WorkflowKind::WebSocketOnlySubscribe => match self.step {
+                0 => Some(OrchestratorTask::CreateRouterIfNeeded {
+                    exchange: self.subscription.exchange,
+                }),
+                1 => Some(OrchestratorTask::SubscribeWebSocket {
+                    subscription: self.subscription.clone()
+                }),
+                _ => None,
+            },
+            #[cfg(feature = "dev-ws-only")]
+            WorkflowKind::WebSocketOnlyUnsubscribe => match self.step {
+                0 => Some(OrchestratorTask::UnsubscribeWebSocket {
+                    subscription: self.subscription.clone()
+                }),
+                _ => None,
+            }
         }
     }
 
@@ -185,7 +210,7 @@ impl OrchestratorTask {
                         TaskOutcome::Pending
                     };
                 }
-                match orch.create_router(&exchange).await {
+                match orch.create_router(&exchange) {
                     Ok(_) => {
                         info!("Creating RouterActor for exchange: {}", exchange);
                         TaskOutcome::Pending
@@ -205,10 +230,7 @@ impl OrchestratorTask {
                     None => return TaskOutcome::Error(OrchestratorError::BroadcastActorMissing),
                 };
 
-                if let Err(e) = orch
-                    .create_orderbook_actor(&subscription, &broadcast_actor_id)
-                    .await
-                {
+                if let Err(e) = orch.create_orderbook_actor(&subscription, &broadcast_actor_id) {
                     return TaskOutcome::Error(e);
                 }
                 TaskOutcome::Complete
@@ -243,7 +265,7 @@ impl OrchestratorTask {
                         TaskOutcome::Pending
                     };
                 };
-                orch.create_broadcast_actor().await;
+                orch.create_broadcast_actor();
                 TaskOutcome::Pending
             }
 
@@ -282,7 +304,6 @@ impl OrchestratorTask {
 
                         match orch
                             .create_websocket_actor(&subscription.exchange, &router_actor_id)
-                            .await
                         {
                             Ok(new_id) => new_id,
                             Err(e) => return TaskOutcome::Error(e),
@@ -351,20 +372,17 @@ impl OrchestratorTask {
             }
 
             OrchestratorTask::TeardownOrderBook { subscription } => {
-                let orderbook_actor_id = match orch
+                let Some(orderbook_actor_id) = orch
                     .orderbooks
                     .iter()
                     .find(|(_, meta)| meta.subscription.stream_id == subscription.stream_id)
-                    .map(|(key, _)| key.clone())
-                {
-                    Some(id) => id,
-                    None => return TaskOutcome::Error(OrchestratorError::OrderBookActorMissing),
-                };
+                    .map(|(key, _)| key.clone()) else { return TaskOutcome::Error(OrchestratorError::OrderBookActorMissing) };
+
                 match orch
                     .teardown_orderbook_actor(&orderbook_actor_id, &subscription)
                     .await
                 {
-                    Ok(_) => TaskOutcome::Complete,
+                    Ok(()) => TaskOutcome::Complete,
                     Err(e) => TaskOutcome::Error(e),
                 }
             }

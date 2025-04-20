@@ -1,4 +1,4 @@
-// server/src/async_actors/deribit/websocket.rs
+// server/src/async_actors/websocket/deribit.rs
 
 
 // 📦 External Crates
@@ -13,12 +13,12 @@ use tokio_tungstenite::{
     tungstenite::{protocol::Message, Error as TungsteniteError},
     MaybeTlsStream, WebSocketStream,
 };
-use thiserror::Error;
 use tracing::{debug, error, info, warn, Instrument};
 
 // 🧠 Internal Crates / Modules
-use crate::async_actors::messages::{ExchangeMessage, WebSocketCommand, WebSocketMessage};
+use crate::async_actors::messages::{ExchangeMessage, WebSocketCommand};
 use crate::domain::ExchangeSubscription;
+use super::{WebSocketMessage, WebSocketActorError};
 
 // 🔧 Type Definitions
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -100,17 +100,17 @@ static UNSUBSCRIBE_ALL_MESSAGE: Lazy<Message> = Lazy::new(|| {
     Message::Text(json.to_string().into())
 });
 
-#[derive(Debug, Error)]
-enum WebSocketActorError {
-    #[error("Timed out sending close frame")]
-    Timeout,
-    #[error("Connection error: {0}")]
-    Connection(String),
-    #[error("WebSocket send error: {0}")]
-    Send(#[from] TungsteniteError),
-    #[error("WebSocket write stream not initialized")]
-    WriteNotInitialised,
-}
+// #[derive(Debug, Error)]
+// enum WebSocketActorError {
+//     #[error("Timed out sending close frame")]
+//     Timeout,
+//     #[error("Connection error: {0}")]
+//     Connection(String),
+//     #[error("WebSocket send error: {0}")]
+//     Send(#[from] TungsteniteError),
+//     #[error("WebSocket write stream not initialized")]
+//     WriteNotInitialised,
+// }
 
 pub struct DeribitWebSocketActor {
     command_receiver: mpsc::Receiver<WebSocketCommand>,
@@ -205,7 +205,7 @@ impl DeribitWebSocketActor {
         .await
     }
 
-    async fn send_heartbeat(&mut self) -> bool {
+    async fn send_heartbeat(&self) -> bool {
         match self
             .to_orch
             .send(WebSocketMessage::Heartbeat {
@@ -324,7 +324,7 @@ impl DeribitWebSocketActor {
                 }
                 Err(e) => {
                     error!("Failed to send message to exchange: {e}");
-                    Err(WebSocketActorError::Send(e))
+                    Err(WebSocketActorError::Send(e.to_string()))
                 }
             }
         } else {
@@ -343,7 +343,7 @@ impl DeribitWebSocketActor {
                 }
                 Err(e) => {
                     error!(actor_id = %self.actor_id,"Failed to send Stay-Alive message: {e}");
-                    Err(WebSocketActorError::Send(e))
+                    Err(WebSocketActorError::Send(e.to_string()))
                 }
             }
         } else {
@@ -358,7 +358,7 @@ impl DeribitWebSocketActor {
             write
                 .send(UNSUBSCRIBE_ALL_MESSAGE.clone())
                 .await
-                .map_err(|e| WebSocketActorError::Send(e))
+                .map_err(|e| WebSocketActorError::Send(e.to_string()))
         } else {
             Err(WebSocketActorError::WriteNotInitialised)
         }
@@ -376,7 +376,7 @@ impl DeribitWebSocketActor {
             {
                 Ok(Err(err)) => {
                     warn!("Failed to send WebSocket close frame: {:?}", err);
-                    Err(WebSocketActorError::Send(err))
+                    Err(WebSocketActorError::Send(err.to_string()))
                 }
                 Err(_) => {
                     warn!("Timeout while waiting to send WebSocket close frame");

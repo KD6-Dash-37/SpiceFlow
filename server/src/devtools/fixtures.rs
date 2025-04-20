@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use crate::model::InstrumentType;
 
 /// Loads a raw JSON fixture as a string from the `fixtures/` directory.
+#[must_use]
 pub fn load_json_fixture(filename: &str) -> String {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
 
@@ -23,6 +24,7 @@ pub fn load_json_fixture(filename: &str) -> String {
 /// Loads the appropriate Binance exchangeInfo fixture by instrument type.
 ///
 /// This panics if the file cannot be loaded or parsed — intended for development use only.
+#[must_use]
 pub fn load_binance_exchange_info_fixture(instrument_type: &InstrumentType) -> String {
     let filename = match instrument_type {
         InstrumentType::LinFut | InstrumentType::LinPerp => "exchangeInfoUSDM.json",

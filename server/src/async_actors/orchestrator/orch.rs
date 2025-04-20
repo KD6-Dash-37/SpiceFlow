@@ -13,12 +13,12 @@ use tracing::{debug, error, info, warn, Instrument};
 // 🧠 Internal Crates / Modules
 use crate::async_actors::broadcast::BroadcastActor;
 use crate::async_actors::deribit::{
-    DeribitOrderBookActor, DeribitRouterActor, DeribitWebSocketActor,
+    DeribitOrderBookActor, DeribitRouterActor
 };
+use crate::async_actors::websocket::{DeribitWebSocketActor, BinanceWebSocketActor, WebSocketMessage};
 use crate::async_actors::messages::{
     BroadcastActorCommand, BroadcastActorMessage, OrderBookCommand, OrderBookMessage,
-    ProcessedMarketData, RawMarketData, RouterCommand, RouterMessage, WebSocketCommand,
-    WebSocketMessage,
+    ProcessedMarketData, RawMarketData, RouterCommand, RouterMessage, WebSocketCommand
 };
 use crate::async_actors::orchestrator::tasks::{TaskOutcome, Workflow, WorkflowKind};
 use crate::domain::ExchangeSubscription;
@@ -90,13 +90,13 @@ impl Orchestrator {
             loop {
                 tokio::select! {
                     Some(request) = self.request_receiver.recv() => {
-                        self._handle_request(request).await;
+                        self.handle_request(request);
                     }
                     Some(ws_message) = self.from_ws.recv() => {
-                        self.handle_websocket_message(ws_message).await;
+                        self.handle_websocket_message(ws_message);
                     }
                     Some(router_message) = self.from_router.recv() => {
-                        self.handle_router_message(router_message).await;
+                        self.handle_router_message(router_message);
                     }
                     Some(orderbook_message) = self.from_orderbook.recv() => {
                         self.handle_orderbook_message(orderbook_message).await;
@@ -115,20 +115,34 @@ impl Orchestrator {
         .await
     }
 
-    async fn _handle_request(&mut self, request: SubscriptionAction) {
+    fn handle_request(&mut self, request: SubscriptionAction) {
         match request {
             SubscriptionAction::Subscribe(subscription) => {
+                #[cfg(feature = "dev-ws-only")]
+                {
+                    info!("🧪 Dev mode enabled — spawning WebSocketOnlySubscribe workflow for {}", subscription.stream_id);
+                    self.workflows
+                        .push_back(Workflow::new(subscription, WorkflowKind::WebSocketOnlySubscribe));
+                    return;
+                }
                 self.workflows
                     .push_back(Workflow::new(subscription, WorkflowKind::Subscribe));
             }
             SubscriptionAction::Unsubscribe(subscription) => {
+                #[cfg(feature = "dev-ws-only")]
+                {
+                    info!("🧪 Dev mode enabled — spawning WebSocketOnlyUnsubscribe workflow for {}", subscription.stream_id);
+                    self.workflows
+                        .push_back(Workflow::new(subscription, WorkflowKind::WebSocketOnlyUnsubscribe));
+                    return;
+                }
                 self.workflows
                     .push_back(Workflow::new(subscription, WorkflowKind::Unsubscribe));
             }
         }
     }
 
-    async fn handle_websocket_message(&mut self, ws_message: WebSocketMessage) {
+    fn handle_websocket_message(&mut self, ws_message: WebSocketMessage) {
         match ws_message {
             WebSocketMessage::Heartbeat { actor_id } => {
                 if let Some(ws_actor_meta) = self.websockets.get_mut(&actor_id) {
@@ -151,10 +165,14 @@ impl Orchestrator {
                     info!("ws_actor: {actor_id} has been removed from actor registry");
                 }
             }
+            WebSocketMessage::Error { actor_id, error } => {
+                error!(?error, "Error on WebSocket: {actor_id}");
+                // optional: initiate retry, teardown, or state tracking
+            }
         }
     }
 
-    async fn handle_router_message(&mut self, router_message: RouterMessage) {
+    fn handle_router_message(&mut self, router_message: RouterMessage) {
         match router_message {
             RouterMessage::Heartbeat { actor_id } => {
                 if let Some(router_meta) = self.routers.get_mut(&actor_id) {
@@ -363,25 +381,39 @@ impl Orchestrator {
     // -------------------------------------------------------
     // Router Management
     // -------------------------------------------------------
-    pub async fn create_router(
+    pub fn create_router(
         &mut self,
         exchange: &Exchange,
     ) -> Result<String, OrchestratorError> {
-        debug!(
-            "Creating RouterActor for exchange: {}",
-            exchange.to_string()
-        );
-        let actor_id = generate_actor_id("DeribitRouterActor".to_string());
+        #[cfg(feature = "dev-ws-only")]
+        {
+            let actor_id = generate_actor_id(format!("{}DummyRouterActor", exchange));
+            let (router_sender, _) = mpsc::channel(1);
+            let (router_command_sender, _) = mpsc::channel::<RouterCommand>(1);
+            let join_handle = tokio::spawn(async move {
+                debug!("Spawned no-op DevRouterActor");
+            });
+            let mut metadata = RouterMetadata::new(
+                actor_id.clone(),
+                *exchange,
+                router_sender,
+                router_command_sender,
+                join_handle
+            );
+            metadata.last_heartbeat = Some(Instant::now());
+            self.routers.insert(actor_id.clone(), metadata);
+            return Ok(actor_id);
+        }
+        debug!("Creating RouterActor for exchange: {}", exchange);
+        let actor_id = generate_actor_id(format!("{}RouterActor", exchange));
         let (router_sender, router_receiver) = mpsc::channel(32);
         let (router_command_receiver, from_orch) = mpsc::channel(32);
         let to_orch = self.router_message_sender.clone();
 
         let router_actor =
             DeribitRouterActor::new(actor_id.clone(), router_receiver, to_orch, from_orch);
-        let join_handle = tokio::spawn(async move {
-            router_actor.run().await;
-        });
-        debug!("Created a new DeribitRouter, actor_id: {}", actor_id);
+        let join_handle = tokio::spawn(router_actor.run());
+        debug!("Created a new {}RouterActor, actor_id: {}", exchange, actor_id);
         let router_meta = RouterMetadata::new(
             actor_id.clone(),
             *exchange,
@@ -520,7 +552,7 @@ impl Orchestrator {
     // -------------------------------------------------------
     // WebSocket Management
     // -------------------------------------------------------
-    pub async fn create_websocket_actor(
+    pub fn create_websocket_actor(
         &mut self,
         exchange: &Exchange,
         router_actor_id: &str,
@@ -540,20 +572,32 @@ impl Orchestrator {
             }
         };
         let router_sender = router.router_sender.clone();
-        let actor_id = generate_actor_id("DeribitWebSocketActor".to_string());
+        let actor_id = generate_actor_id(format!("{}WebSocketActor", exchange));
         let (command_sender, command_receiver) = mpsc::channel::<WebSocketCommand>(32);
         let ws_msg_sender = self.ws_message_sender.clone();
+        let join_handle = match exchange {
+            Exchange::Deribit => {
+                let new_ws_actor = DeribitWebSocketActor::new(
+                    command_receiver,
+                    ws_msg_sender,
+                    router_sender,
+                    actor_id.clone(),
+                );
+                tokio::spawn(new_ws_actor.run())
+            }
 
-        let new_ws_actor = DeribitWebSocketActor::new(
-            command_receiver,
-            ws_msg_sender,
-            router_sender,
-            actor_id.clone(),
-        );
-        let join_handle = tokio::spawn(async move {
-            new_ws_actor.run().await;
-        });
-        let requested_streams: HashMap<String, ExchangeSubscription> = HashMap::new();
+            Exchange::Binance => {
+                let new_ws_actor = BinanceWebSocketActor::new(
+                    actor_id.clone(),
+                    command_receiver,
+                    ws_msg_sender,
+                    router_sender,
+                );
+                tokio::spawn(new_ws_actor.run())
+            }
+        };
+
+        let requested_streams: HashMap<String, ExchangeSubscription> = HashMap::new();        
         self.websockets.insert(
             actor_id.clone(),
             WebSocketMetadata::new(
@@ -607,7 +651,12 @@ impl Orchestrator {
         debug!("Requested subscription of {stream_id} from WebSocketActor: {ws_actor_id}");
         ws_meta
             .requested_streams
-            .insert(stream_id.clone(), subscription);
+            .insert(stream_id.clone(), subscription.clone());
+        
+        #[cfg(feature = "dev-ws-only")]
+        // In dev mode, we’re skipping Router confirmations, so just assume the subscription is active.
+        ws_meta.subscribed_streams.insert(stream_id.clone(), subscription);
+        
         Ok(())
     }
 
@@ -673,7 +722,7 @@ impl Orchestrator {
     // -------------------------------------------------------
     // OrderBook Management
     // -------------------------------------------------------
-    pub async fn create_orderbook_actor(
+    pub fn create_orderbook_actor(
         &mut self,
         subscription: &ExchangeSubscription,
         broadcast_actor_id: &str,
@@ -705,9 +754,7 @@ impl Orchestrator {
             raw_market_data_receiver,
             market_data_sender,
         );
-        let join_handle = tokio::spawn(async move {
-            new_ob_actor.run().await;
-        });
+        let join_handle = tokio::spawn(new_ob_actor.run());
         self.orderbooks.insert(
             actor_id.clone(),
             OrderBookMetadata::new(
@@ -771,7 +818,7 @@ impl Orchestrator {
     // -------------------------------------------------------
     // BroadcastActor Management
     // -------------------------------------------------------
-    pub async fn create_broadcast_actor(&mut self) -> String {
+    pub fn create_broadcast_actor(&mut self) -> String {
         info!("Creating BroadcastActor");
         let actor_id = generate_actor_id("BroadcastActor".to_string());
         let (command_sender, command_receiver) =

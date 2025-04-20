@@ -11,7 +11,7 @@ use tracing::{debug, error, info, warn, Instrument};
 use tungstenite::Message;
 
 // 🧠 Internal Crates / Modules
-use crate::async_actors::deribit::websocket::SubscriptionManagementAction;
+use crate::async_actors::websocket::SubscriptionManagementAction;
 use crate::async_actors::messages::{ExchangeMessage, RawMarketData, RouterCommand, RouterMessage};
 use crate::domain::ExchangeSubscription;
 use crate::model::RequestedFeed;
@@ -146,7 +146,7 @@ impl DeribitRouterActor {
         .await
     }
 
-    async fn send_heartbeat(&mut self) -> bool {
+    async fn send_heartbeat(&self) -> bool {
         match self
             .to_orch
             .send(RouterMessage::Heartbeat {
@@ -166,7 +166,7 @@ impl DeribitRouterActor {
     }
 
     fn parse_message(
-        &mut self,
+        &self,
         exchange_message: &ExchangeMessage,
     ) -> ParseMessageResult<ParsedMessage> {
         let text = match &exchange_message.message {

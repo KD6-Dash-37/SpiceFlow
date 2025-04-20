@@ -14,23 +14,58 @@ use axum::{
 };
 use serde_json::json;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tracing::{error, info};
 
 // 🧠 Internal moduless
 use crate::domain::ref_data::{ExchangeRefDataProvider, RefDataService};
 use crate::domain::subscription::ExchangeSubscription;
-use crate::http_api::handle::{OrchestratorHandle, SubscriptionAction};
+use crate::async_actors::orchestrator::OrchestratorError;
 
 use super::requests::{RawSubscriptionRequest, SubscriptionRequest};
 
+
+#[derive(Debug, Clone)]
+pub enum SubscriptionAction {
+    Subscribe(ExchangeSubscription),
+    Unsubscribe(ExchangeSubscription),
+}
+
+#[derive(Clone)]
+pub struct OrchHandle {
+    sender: mpsc::Sender<SubscriptionAction>,
+}
+
+impl OrchHandle {
+    #[must_use]
+    pub const fn new(sender: mpsc::Sender<SubscriptionAction>) -> Self {
+        Self { sender }
+    }
+
+    /// Sends a [`SubscriptionAction`] to the orchestrator for processing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrchestratorError::ChannelClosed`] if the underlying channel is closed
+    /// and the message cannot be delivered.
+    pub async fn send(&self, sub: SubscriptionAction) -> Result<(), OrchestratorError> {
+        self.sender
+            .send(sub)
+            .await
+            .map_err(|_| OrchestratorError::ChannelClosed)
+    }
+}
+
+
+
 #[derive(Clone)]
 pub struct AppState {
-    pub orchestrator_handle: OrchestratorHandle,
+    pub orchestrator_handle: OrchHandle,
     pub ref_data: Arc<RefDataService>,
 }
 
 pub async fn start_http_server(
-    orchestrator_handle: OrchestratorHandle,
+    orchestrator_handle: OrchHandle,
     ref_data: Arc<RefDataService>,
 ) {
     let state = AppState {
@@ -43,11 +78,20 @@ pub async fn start_http_server(
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    let listener = TcpListener::bind(addr)
-        .await
-        .expect("Failed to bind address");
+    let listener = match TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("❌ Failed to bind address {}: {}", addr, e);
+            return;
+        }
+    };    
     info!("📡 HTTP server listening on http://{}", addr);
-    serve(listener, app).await.expect("Server failed");
+    match serve(listener, app).await {
+        Ok(()) => (),
+        Err(e) => {
+            error!("Server failed: {e}");
+        }
+    }
 }
 
 pub async fn subscribe_handler(
@@ -67,7 +111,7 @@ pub async fn unsubscribe_handler(
 async fn handle_subscription_action(
     state: &AppState,
     raw: RawSubscriptionRequest,
-    action_builder: impl FnOnce(ExchangeSubscription) -> SubscriptionAction,
+    action_builder: impl FnOnce(ExchangeSubscription) -> SubscriptionAction + Send + 'static,
 ) -> Response {
     let request = match SubscriptionRequest::try_from(raw) {
         Ok(r) => r,

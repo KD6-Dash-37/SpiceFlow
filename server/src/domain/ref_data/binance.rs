@@ -172,7 +172,7 @@ fn url_for_type(instrument_type: InstrumentType) -> Result<Url, RefDataError> {
         InstrumentType::InvPerp | InstrumentType::InvFut => URL_COINM,
         InstrumentType::Spot => URL_SPOT,
     };
-    Url::parse(&url).map_err(|_| RefDataError::ParseError("Invalid Binance URL".into()))
+    Url::parse(url).map_err(|_| RefDataError::ParseError("Invalid Binance URL".into()))
 }
 
 fn is_binance_match(
