@@ -1,7 +1,6 @@
 // server/src/domain/mod.rs
+mod sub;
+mod instrument_static;
 
-pub mod instrument;
-pub mod ref_data;
-pub mod subscription;
-pub use ref_data::RefDataService;
-pub use subscription::ExchangeSubscription;
+pub use sub::ExchangeSubscription;
+pub use instrument_static::{ExchangeRefDataProvider, RefDataService};

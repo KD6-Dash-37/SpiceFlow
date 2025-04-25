@@ -8,17 +8,72 @@ use std::sync::Arc;
 // 🧠 Internal modules
 mod binance;
 mod deribit;
-pub mod types;
+mod types;
 
-use crate::domain::instrument::ExchangeInstruments;
-use crate::domain::instrument::Instrument;
-use crate::domain::ref_data::types::RefDataError;
+use crate::model::{Exchange, InstrumentType};
 use crate::domain::ExchangeSubscription;
 use crate::http_api::SubscriptionRequest;
-use crate::model::Exchange;
 
-use binance::BinanceRefData;
-use deribit::DeribitRefData;
+use types::RefDataError;
+use binance::{BinanceRefData, BinanceSymbol};
+use deribit::{DeribitRefData, DeribitInstrument};
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Instrument {
+    pub exchange: Exchange,
+    pub exchange_symbol: String,
+    pub base: String,
+    pub quote: String,
+    pub instrument_type: InstrumentType,
+}
+
+impl TryFrom<DeribitInstrument> for Instrument {
+    type Error = String;
+
+    #[must_use]
+    fn try_from(instr: DeribitInstrument) -> Result<Self, Self::Error> {
+        let instrument_type = instr.infer_type().ok_or_else(|| {
+            format!(
+                "Failed to infer instrument type for DeribitInstrument: {}",
+                instr.instrument_name
+            )
+        })?;
+        Ok( Self {
+            exchange: Exchange::Deribit,
+            exchange_symbol: instr.instrument_name,
+            base: instr.base_currency,
+            quote: instr.quote_currency,
+            instrument_type,
+        })
+    }
+}
+
+impl Instrument {
+    pub fn to_internal_symbol(&self) -> String {
+        format!(
+            "{}.{}.{}.{}",
+            self.exchange, self.instrument_type, self.base, self.quote
+        )
+    }
+}
+
+#[derive(Debug)]
+pub enum ExchangeInstruments {
+    Binance(Vec<BinanceSymbol>),
+    Deribit(Vec<DeribitInstrument>),
+}
+
+impl ExchangeInstruments {
+    pub fn as_deribit(&self) -> Option<&Vec<DeribitInstrument>> {
+        match self {
+            ExchangeInstruments::Deribit(ref instruments) => Some(instruments),
+            _ => None,
+        }
+    }
+}
+
+
 
 #[async_trait::async_trait]
 pub trait ExchangeRefDataProvider: Send + Sync {
