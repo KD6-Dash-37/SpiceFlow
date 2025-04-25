@@ -3,5 +3,7 @@
 mod request_handler;
 mod requests;
 
-pub use request_handler::{start_http_server, OrchHandle, SubscriptionAction};
+use requests::RawSubscriptionRequest;
+
 pub use requests::SubscriptionRequest;
+pub use request_handler::{start_http_server, OrchHandle, SubscriptionAction};

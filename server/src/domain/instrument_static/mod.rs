@@ -6,13 +6,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 // 🧠 Internal modules
-mod binance;
-mod deribit;
-mod types;
-
 use crate::model::{Exchange, InstrumentType};
 use crate::domain::ExchangeSubscription;
 use crate::http_api::SubscriptionRequest;
+
+// 🔧 Local Modules
+mod binance;
+mod deribit;
+mod types;
 
 use types::RefDataError;
 use binance::{BinanceRefData, BinanceSymbol};
