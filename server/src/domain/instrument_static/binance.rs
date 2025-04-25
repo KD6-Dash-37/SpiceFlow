@@ -8,10 +8,10 @@ use url::Url;
 
 // 🧠 Internal modules
 use super::types::RefDataError;
-use super::{ExchangeRefDataProvider, Instrument, ExchangeInstruments};
+use super::{ExchangeInstruments, ExchangeRefDataProvider, Instrument};
 use crate::domain::ExchangeSubscription;
 use crate::http_api::SubscriptionRequest;
-use crate::model::{InstrumentType, Exchange};
+use crate::model::{Exchange, InstrumentType};
 
 #[cfg(not(feature = "dev-fixtures"))]
 const URL_SPOT: &str = "https://api.binance.com/api/v3/exchangeInfo";
@@ -20,11 +20,11 @@ const URL_USDM: &str = "https://fapi.binance.com/fapi/v1/exchangeInfo";
 #[cfg(not(feature = "dev-fixtures"))]
 const URL_COINM: &str = "https://dapi.binance.com/dapi/v1/exchangeInfo";
 
-
 const CONTRACT_TYPE_PERPETUAL: &str = "PERPETUAL";
 const NEXT_Q_FUT: &str = "NEXT_QUARTER";
 const CUR_Q_FUT: &str = "CURRENT_QUARTER";
 
+#[allow(clippy::module_name_repetitions)]
 #[derive(Debug, Clone, Copy)]
 pub enum BinanceInstrumentSource {
     Spot,
@@ -32,6 +32,7 @@ pub enum BinanceInstrumentSource {
     Coinm,
 }
 
+#[allow(clippy::module_name_repetitions)]
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BinanceSymbol {
     #[serde(rename = "symbol")]
@@ -44,9 +45,10 @@ pub struct BinanceSymbol {
     pub contract_type: Option<String>,
 }
 
+#[allow(clippy::module_name_repetitions)]
 impl BinanceSymbol {
     #[must_use]
-    pub fn infer_type(&self, source: &BinanceInstrumentSource) -> Option<InstrumentType> {
+    pub fn infer_type(&self, source: BinanceInstrumentSource) -> Option<InstrumentType> {
         match source {
             BinanceInstrumentSource::Spot => Some(InstrumentType::Spot),
             BinanceInstrumentSource::Usdm => match self.contract_type.as_deref()? {
@@ -63,7 +65,7 @@ impl BinanceSymbol {
     }
 
     #[must_use]
-    pub fn to_instrument(&self, source: &BinanceInstrumentSource) -> Option<Instrument> {
+    pub fn to_instrument(&self, source: BinanceInstrumentSource) -> Option<Instrument> {
         let instrument_type = self.infer_type(source)?;
         Some(Instrument {
             exchange: Exchange::Binance,
@@ -75,12 +77,13 @@ impl BinanceSymbol {
     }
 }
 
-
+#[allow(clippy::module_name_repetitions)]
 #[derive(Debug, Deserialize)]
 struct BinanceExchangeInfo {
     symbols: Vec<BinanceSymbol>,
 }
 
+#[allow(clippy::module_name_repetitions)]
 pub struct BinanceRefData {
     #[allow(dead_code)]
     client: reqwest::Client,
@@ -106,7 +109,7 @@ impl ExchangeRefDataProvider for BinanceRefData {
             let text =
                 devtools::fixtures::load_binance_exchange_info_fixture(&request.instrument_type);
             let exchange_info: BinanceExchangeInfo = serde_json::from_str(&text).map_err(|e| {
-                RefDataError::ParseError(format!("Failed to parse Binance exchangeInfo: {}", e))
+                RefDataError::ParseError(format!("Failed to parse Binance exchangeInfo: {e}"))
             })?;
             Ok(ExchangeInstruments::Binance(exchange_info.symbols))
         }
@@ -131,19 +134,17 @@ impl ExchangeRefDataProvider for BinanceRefData {
                     .unwrap_or_else(|_| "<body unreadable>".into());
                 error!("❌ Binance returned error status {}: {}", status, text);
                 return Err(RefDataError::HttpError(format!(
-                    "Binance responded with HTTP {}: {}",
-                    status, text
+                    "Binance responded with HTTP {status}: {text}"
                 )));
             }
 
             let text = response.text().await.map_err(|e| {
-                RefDataError::HttpError(format!("Failed to read response body: {}", e))
+                RefDataError::HttpError(format!("Failed to read response body: {e}"))
             })?;
 
             let exchange_info: BinanceExchangeInfo = serde_json::from_str(&text).map_err(|e| {
                 RefDataError::ParseError(format!(
-                    "Failed to parse Binance exchangeInfo: {}\nRaw response",
-                    e
+                    "Failed to parse Binance exchangeInfo: {e}\nRaw response"
                 ))
             })?;
             Ok(ExchangeInstruments::Binance(exchange_info.symbols))
@@ -170,16 +171,18 @@ impl ExchangeRefDataProvider for BinanceRefData {
 
         let filtered_instruments = typed
             .iter()
-            .filter(|instr| is_binance_match(instr, request, &source, request.instrument_type));
+            .filter(|instr| is_binance_match(instr, request, source, request.instrument_type));
 
         let matched_instruments: Vec<_> = filtered_instruments.collect();
 
         match matched_instruments.len() {
             0 => Ok(None),
             1 => {
-                let instrument = matched_instruments[0].to_instrument(&source).ok_or(
-                    RefDataError::ParseError("Failed to serialize BinanceSymbol".into()),
-                )?;
+                let instrument = matched_instruments[0]
+                    .to_instrument(source)
+                    .ok_or_else(|| {
+                        RefDataError::ParseError("Failed to serialize BinanceSymbol".into())
+                    })?;
                 Ok(Some(instrument))
             }
             n => Err(RefDataError::MultipleInstrumentMatches {
@@ -231,7 +234,7 @@ fn url_for_type(instrument_type: InstrumentType) -> Result<Url, RefDataError> {
 fn is_binance_match(
     instrument: &BinanceSymbol,
     request: &SubscriptionRequest,
-    source: &BinanceInstrumentSource,
+    source: BinanceInstrumentSource,
     expected_type: InstrumentType,
 ) -> bool {
     instrument.base_currency == request.base

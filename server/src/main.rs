@@ -9,7 +9,7 @@ use tracing::info;
 // 🧠 Internal modules
 use server::async_actors::orchestrator::Orchestrator;
 use server::domain::RefDataService;
-use server::http_api::{SubscriptionAction, start_http_server, OrchHandle};
+use server::http_api::{start_http_server, OrchHandle, SubscriptionAction};
 
 #[tokio::main]
 async fn main() {

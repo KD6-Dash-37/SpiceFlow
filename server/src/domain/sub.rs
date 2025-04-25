@@ -3,7 +3,6 @@
 // 🧠 Internal modules
 use crate::model::{Exchange, RequestedFeed};
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExchangeSubscription {
     pub internal_symbol: String,

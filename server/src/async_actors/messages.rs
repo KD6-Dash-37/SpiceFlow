@@ -9,7 +9,6 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use crate::domain::ExchangeSubscription;
 use crate::model::RequestedFeed;
 
-
 #[derive(Debug)]
 pub enum WebSocketCommand {
     Subscribe(ExchangeSubscription),
@@ -25,7 +24,7 @@ pub struct ExchangeMessage {
 }
 
 impl ExchangeMessage {
-    pub fn new(actor_id: String, message: Message) -> Self {
+    pub const fn new(actor_id: String, message: Message) -> Self {
         Self { actor_id, message }
     }
 }
@@ -85,7 +84,7 @@ pub enum ProcessedMarketData {
 impl Topic for ProcessedMarketData {
     fn topic(&self) -> &str {
         match self {
-            ProcessedMarketData::OrderBook(ob) => ob.topic(),
+            Self::OrderBook(ob) => ob.topic(),
         }
     }
 }

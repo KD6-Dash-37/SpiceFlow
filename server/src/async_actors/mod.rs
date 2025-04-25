@@ -2,7 +2,7 @@
 
 pub mod broadcast;
 pub mod deribit;
-mod websocket;
 pub mod messages;
 pub mod orchestrator;
+mod websocket;
 pub use orchestrator::Orchestrator;

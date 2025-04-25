@@ -1,6 +1,5 @@
 // server/src/async_actors/websocket/deribit.rs
 
-
 // 📦 External Crates
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use futures_util::SinkExt;
@@ -16,13 +15,12 @@ use tokio_tungstenite::{
 use tracing::{debug, error, info, warn, Instrument};
 
 // 🧠 Internal Crates / Modules
+use super::{WebSocketActorError, WebSocketMessage};
 use crate::async_actors::messages::{ExchangeMessage, WebSocketCommand};
 use crate::domain::ExchangeSubscription;
-use super::{WebSocketMessage, WebSocketActorError};
 
 // 🔧 Type Definitions
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
-
 
 const WEBSOCKET_HEARTBEAT_INTERVAL: u64 = 5;
 const WEBSOCKET_STAY_ALIVE_INTERVAL: u64 = 5;
@@ -40,28 +38,28 @@ pub enum SubscriptionManagementAction {
 }
 
 impl SubscriptionManagementAction {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            SubscriptionManagementAction::Subscribe => "public/subscribe",
-            SubscriptionManagementAction::Unsubscribe => "public/unsubscribe",
-            SubscriptionManagementAction::UnsubscribeAll => "public/unsubscribe_all",
-            SubscriptionManagementAction::Test => "public/test",
+            Self::Subscribe => "public/subscribe",
+            Self::Unsubscribe => "public/unsubscribe",
+            Self::UnsubscribeAll => "public/unsubscribe_all",
+            Self::Test => "public/test",
         }
     }
-    fn as_id(&self) -> u64 {
+    const fn as_id(&self) -> u64 {
         match self {
-            SubscriptionManagementAction::Subscribe => 1,
-            SubscriptionManagementAction::Unsubscribe => 2,
-            SubscriptionManagementAction::UnsubscribeAll => 21,
-            SubscriptionManagementAction::Test => 9999,
+            Self::Subscribe => 1,
+            Self::Unsubscribe => 2,
+            Self::UnsubscribeAll => 21,
+            Self::Test => 9999,
         }
     }
-    pub fn from_id(id: u64) -> Option<Self> {
+    pub const fn from_id(id: u64) -> Option<Self> {
         match id {
-            1 => Some(SubscriptionManagementAction::Subscribe),
-            2 => Some(SubscriptionManagementAction::Unsubscribe),
-            21 => Some(SubscriptionManagementAction::UnsubscribeAll),
-            9999 => Some(SubscriptionManagementAction::Test),
+            1 => Some(Self::Subscribe),
+            2 => Some(Self::Unsubscribe),
+            21 => Some(Self::UnsubscribeAll),
+            9999 => Some(Self::Test),
             _ => None,
         }
     }
@@ -100,18 +98,7 @@ static UNSUBSCRIBE_ALL_MESSAGE: Lazy<Message> = Lazy::new(|| {
     Message::Text(json.to_string().into())
 });
 
-// #[derive(Debug, Error)]
-// enum WebSocketActorError {
-//     #[error("Timed out sending close frame")]
-//     Timeout,
-//     #[error("Connection error: {0}")]
-//     Connection(String),
-//     #[error("WebSocket send error: {0}")]
-//     Send(#[from] TungsteniteError),
-//     #[error("WebSocket write stream not initialized")]
-//     WriteNotInitialised,
-// }
-
+#[allow(clippy::module_name_repetitions)]
 pub struct DeribitWebSocketActor {
     command_receiver: mpsc::Receiver<WebSocketCommand>,
     to_orch: mpsc::Sender<WebSocketMessage>,
@@ -122,7 +109,7 @@ pub struct DeribitWebSocketActor {
 }
 
 impl DeribitWebSocketActor {
-    pub fn new(
+    pub const fn new(
         command_receiver: mpsc::Receiver<WebSocketCommand>,
         to_orch: mpsc::Sender<WebSocketMessage>,
         router_sender: mpsc::Sender<ExchangeMessage>,
@@ -193,7 +180,7 @@ impl DeribitWebSocketActor {
                             },
                             Err(err) => {
                                 warn!("Stay-Alive failed: {:?}", err);
-                                let _ = self.send_message_to_orch(WebSocketMessage::Disconnected { actor_id: self.actor_id.clone() }).await;
+                                self.send_message_to_orch(WebSocketMessage::Disconnected { actor_id: self.actor_id.clone() }).await;
                                 break;
                             }
                         }
@@ -202,7 +189,7 @@ impl DeribitWebSocketActor {
             }
         }
         .instrument(span)
-        .await
+        .await;
     }
 
     async fn send_heartbeat(&self) -> bool {
@@ -213,7 +200,7 @@ impl DeribitWebSocketActor {
             })
             .await
         {
-            Ok(_) => {
+            Ok(()) => {
                 debug!("sent heartbeat"); // TODO convert to metric
                 true
             }
@@ -244,7 +231,7 @@ impl DeribitWebSocketActor {
     async fn send_message_to_orch(&self, mut message: WebSocketMessage) {
         for _ in 0..ORCH_RETRY_ATTEMPTS {
             match self.to_orch.try_send(message) {
-                Ok(_) => {
+                Ok(()) => {
                     debug!("✅ Successfully sent message to orchestrator");
                     return;
                 }
@@ -290,7 +277,7 @@ impl DeribitWebSocketActor {
         info!("Subscribing to {}", subscription.stream_id);
         let channels = vec![subscription.exchange_stream_id];
         if let Some(message) = prepare_subscription_management_message(
-            SubscriptionManagementAction::Subscribe,
+            &SubscriptionManagementAction::Subscribe,
             &channels,
         ) {
             let _ = self.send_message_to_exchange(message).await;
@@ -303,7 +290,7 @@ impl DeribitWebSocketActor {
         info!("Unsubscribing to {}", subscription.stream_id);
         let channels = vec![subscription.exchange_stream_id];
         if let Some(message) = prepare_subscription_management_message(
-            SubscriptionManagementAction::Unsubscribe,
+            &SubscriptionManagementAction::Unsubscribe,
             &channels,
         ) {
             let _ = self.send_message_to_exchange(message).await;
@@ -318,7 +305,7 @@ impl DeribitWebSocketActor {
     ) -> Result<(), WebSocketActorError> {
         if let Some(write) = &mut self.exchange_write {
             match write.send(Message::Text(message.clone().into())).await {
-                Ok(_) => {
+                Ok(()) => {
                     debug!("Successfully sent message to exchange: {:?}", message);
                     Ok(())
                 }
@@ -337,7 +324,7 @@ impl DeribitWebSocketActor {
         debug!("Sending Stay-Alive message...");
         if let Some(write) = &mut self.exchange_write {
             match write.send(STAY_ALIVE_MESSAGE.clone()).await {
-                Ok(_) => {
+                Ok(()) => {
                     debug!("Stay-Alive message sent to exchange");
                     Ok(())
                 }
@@ -393,6 +380,7 @@ impl DeribitWebSocketActor {
         }
     }
 
+    #[allow(clippy::cognitive_complexity)]
     fn drop_exchange_streams(&mut self) {
         debug!("Dropping exchange streams");
         if self.exchange_write.take().is_none() {
@@ -433,7 +421,7 @@ impl DeribitWebSocketActor {
 }
 
 fn prepare_subscription_management_message(
-    action: SubscriptionManagementAction,
+    action: &SubscriptionManagementAction,
     channels: &[String],
 ) -> Option<String> {
     let message = SubscriptionRequest {

@@ -5,10 +5,10 @@ use std::fmt;
 
 // 📦 External Crates
 use thiserror::Error;
-mod deribit;
 mod binance;
-pub use deribit::{DeribitWebSocketActor, SubscriptionManagementAction};
+mod deribit;
 pub use binance::BinanceWebSocketActor;
+pub use deribit::{DeribitWebSocketActor, SubscriptionManagementAction};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum WebSocketActorError {
@@ -24,33 +24,39 @@ pub enum WebSocketActorError {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum WebSocketMessage {
-    Heartbeat { actor_id: String },
-    Disconnected { actor_id: String },
-    Shutdown { actor_id: String },
+    Heartbeat {
+        actor_id: String,
+    },
+    Disconnected {
+        actor_id: String,
+    },
+    Shutdown {
+        actor_id: String,
+    },
     Error {
         actor_id: String,
         error: WebSocketActorError,
-    }
+    },
 }
 
 impl fmt::Display for WebSocketMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WebSocketMessage::Heartbeat { actor_id } => write!(f, "Heartbeat from {}", actor_id),
-            WebSocketMessage::Disconnected { actor_id } => {
-                write!(f, "Disconnected from {}", actor_id)
+            Self::Heartbeat { actor_id } => write!(f, "Heartbeat from {actor_id}"),
+            Self::Disconnected { actor_id } => {
+                write!(f, "Disconnected from {actor_id}")
             }
-            WebSocketMessage::Shutdown { actor_id } => {
-                write!(f, "Shutdown signal from {}", actor_id)
+            Self::Shutdown { actor_id } => {
+                write!(f, "Shutdown signal from {actor_id}")
             }
-            WebSocketMessage::Error { actor_id, error } => {
-                write!(f, "Error on WebSocket from {} - {}", actor_id, error)
+            Self::Error { actor_id, error } => {
+                write!(f, "Error on WebSocket from {actor_id} - {error}")
             }
         }
     }
 }
 
 // WebSocketActor trait candidates
-// - send_heartbeat 
+// - send_heartbeat
 // - create/init actor
 // - connect_and_split

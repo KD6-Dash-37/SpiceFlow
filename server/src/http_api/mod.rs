@@ -5,5 +5,5 @@ mod requests;
 
 use requests::RawSubscriptionRequest;
 
-pub use requests::SubscriptionRequest;
 pub use request_handler::{start_http_server, OrchHandle, SubscriptionAction};
+pub use requests::SubscriptionRequest;
