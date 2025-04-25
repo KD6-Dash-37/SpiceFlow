@@ -1,8 +1,7 @@
-// server/src/domain/subscription/mod.rs
+// server/src/domain/sub.rs
 
 // 🧠 Internal modules
 use crate::model::{Exchange, RequestedFeed};
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExchangeSubscription {

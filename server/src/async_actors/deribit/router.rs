@@ -11,13 +11,14 @@ use tracing::{debug, error, info, warn, Instrument};
 use tungstenite::Message;
 
 // 🧠 Internal Crates / Modules
-use crate::async_actors::websocket::SubscriptionManagementAction;
 use crate::async_actors::messages::{ExchangeMessage, RawMarketData, RouterCommand, RouterMessage};
+use crate::async_actors::websocket::SubscriptionManagementAction;
 use crate::domain::ExchangeSubscription;
 use crate::model::RequestedFeed;
 
 const ROUTER_HEARTBEAT_INTERVAL: u64 = 5;
 
+#[allow(clippy::module_name_repetitions)]
 #[derive(Debug, Error)]
 pub enum RouterParseError {
     #[error("Failed to parse JSON: {0}")]
@@ -63,6 +64,7 @@ pub struct DeribitRouterActor {
 }
 
 impl DeribitRouterActor {
+    #[must_use]
     pub fn new(
         actor_id: String,
         router_receiver: mpsc::Receiver<ExchangeMessage>,
@@ -100,7 +102,7 @@ impl DeribitRouterActor {
                         }
                     }
                     Some(exchange_message) = self.router_receiver.recv() => {
-                        match self.parse_message(&exchange_message) {
+                        match parse_message(&exchange_message) {
                             Ok(parsed_message) => {
                                 match parsed_message {
                                     ParsedMessage::MarketData { exchange_stream_id, data } => {
@@ -143,7 +145,7 @@ impl DeribitRouterActor {
             }
         }
         .instrument(span)
-        .await
+        .await;
     }
 
     async fn send_heartbeat(&self) -> bool {
@@ -154,7 +156,7 @@ impl DeribitRouterActor {
             })
             .await
         {
-            Ok(_) => {
+            Ok(()) => {
                 debug!("Sent hearbeat");
                 true
             }
@@ -163,105 +165,6 @@ impl DeribitRouterActor {
                 false
             }
         }
-    }
-
-    fn parse_message(
-        &self,
-        exchange_message: &ExchangeMessage,
-    ) -> ParseMessageResult<ParsedMessage> {
-        let text = match &exchange_message.message {
-            Message::Text(text) => text.to_string(),
-            Message::Binary(bin) => String::from_utf8(bin.clone().into())
-                .map_err(|_| RouterParseError::InvalidMessageType)?,
-            _ => {
-                warn!(
-                    "❌ Received unsupported message type: {:?}",
-                    exchange_message
-                );
-                return Err(RouterParseError::InvalidMessageType);
-            }
-        };
-
-        let parsed_message: serde_json::Value = serde_json::from_str(&text)?;
-
-        // ✅ Handle Market Data messages (have a "params" key)
-        if let Some(params) = parsed_message.get("params") {
-            let exchange_stream_id = params
-                .get("channel")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| RouterParseError::MissingField("params.channel".to_string()))?
-                .to_string();
-
-            let data = params
-                .get("data")
-                .cloned()
-                .ok_or_else(|| RouterParseError::MissingField("params.data".to_string()))?;
-
-            return Ok(ParsedMessage::MarketData {
-                exchange_stream_id,
-                data,
-            });
-        }
-
-        // ✅ Handle subscription management messages
-        let id = parsed_message
-            .get("id")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| RouterParseError::MissingField("message.id".to_string()))?;
-
-        use SubscriptionManagementAction::*;
-
-        let result = parsed_message
-            .get("result")
-            .ok_or_else(|| RouterParseError::MissingField("result".to_string()))?;
-
-        let message = match SubscriptionManagementAction::from_id(id) {
-            Some(Subscribe) | Some(Unsubscribe) => {
-                let channels = result
-                    .as_array()
-                    .ok_or_else(|| {
-                        RouterParseError::MissingField("result (expected array)".to_string())
-                    })?
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .map(String::from)
-                    .collect();
-
-                match SubscriptionManagementAction::from_id(id) {
-                    Some(Subscribe) => ParsedMessage::Subscribe { channels },
-                    Some(Unsubscribe) => ParsedMessage::Unsubscribe { channels },
-                    _ => unreachable!(),
-                }
-            }
-
-            Some(UnsubscribeAll) => {
-                let result_str = result
-                    .as_str()
-                    .ok_or_else(|| {
-                        RouterParseError::MissingField("result (expected string)".to_string())
-                    })?
-                    .to_string();
-                ParsedMessage::UnsubscribeAll { result: result_str }
-            }
-
-            Some(Test) => {
-                let version = result
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| RouterParseError::MissingField("version".to_string()))?
-                    .to_string();
-                ParsedMessage::Test { version }
-            }
-
-            None => {
-                warn!("⚠️ Unknown subscription management action ID: {}", id);
-                return Err(RouterParseError::InvalidSubscriptionManagementMessage(
-                    parsed_message,
-                ));
-            }
-        };
-
-        Ok(message)
     }
 
     async fn handle_market_data_message(
@@ -286,7 +189,7 @@ impl DeribitRouterActor {
             RequestedFeed::OrderBook => {
                 if let Some(sender) = self.to_data_processor.get_mut(&subscription.stream_id) {
                     match sender.send(market_data).await {
-                        Ok(_) => {}
+                        Ok(()) => {}
                         Err(e) => {
                             error!("Failed to send RawMarketData to Data Processor: {e}");
                         }
@@ -296,6 +199,7 @@ impl DeribitRouterActor {
         }
     }
 
+    #[allow(clippy::cognitive_complexity)]
     fn handle_router_command(&mut self, command: RouterCommand) {
         match command {
             RouterCommand::Subscribe {
@@ -391,15 +295,110 @@ impl DeribitRouterActor {
 }
 
 fn extract_feed_and_symbol(raw_channel: &str) -> ParseMessageResult<(RequestedFeed, String)> {
-    let parts: Vec<&str> = raw_channel.split(".").collect();
+    let parts: Vec<&str> = raw_channel.split('.').collect();
     if parts.len() < 2 {
         return Err(RouterParseError::UnknownChannel(format!(
-            "Invalid channel format: {}",
-            raw_channel
+            "Invalid channel format: {raw_channel}"
         )));
     }
     let feed_type = RequestedFeed::from_exchange_str(parts[0])
         .ok_or_else(|| RouterParseError::UnknownChannel(parts[0].to_string()))?;
     let exchange_symbol = parts[1].to_string();
     Ok((feed_type, exchange_symbol))
+}
+
+fn parse_message(exchange_message: &ExchangeMessage) -> ParseMessageResult<ParsedMessage> {
+    use SubscriptionManagementAction::{Subscribe, Test, Unsubscribe, UnsubscribeAll};
+
+    let text = match &exchange_message.message {
+        Message::Text(text) => text.to_string(),
+        Message::Binary(bin) => String::from_utf8(bin.clone().into())
+            .map_err(|_| RouterParseError::InvalidMessageType)?,
+        _ => {
+            warn!(
+                "❌ Received unsupported message type: {:?}",
+                exchange_message
+            );
+            return Err(RouterParseError::InvalidMessageType);
+        }
+    };
+
+    let parsed_message: serde_json::Value = serde_json::from_str(&text)?;
+
+    // ✅ Handle Market Data messages (have a "params" key)
+    if let Some(params) = parsed_message.get("params") {
+        let exchange_stream_id = params
+            .get("channel")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RouterParseError::MissingField("params.channel".to_string()))?
+            .to_string();
+
+        let data = params
+            .get("data")
+            .cloned()
+            .ok_or_else(|| RouterParseError::MissingField("params.data".to_string()))?;
+
+        return Ok(ParsedMessage::MarketData {
+            exchange_stream_id,
+            data,
+        });
+    }
+
+    // ✅ Handle subscription management messages
+    let id = parsed_message
+        .get("id")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| RouterParseError::MissingField("message.id".to_string()))?;
+
+    let result = parsed_message
+        .get("result")
+        .ok_or_else(|| RouterParseError::MissingField("result".to_string()))?;
+
+    let message = match SubscriptionManagementAction::from_id(id) {
+        Some(Subscribe | Unsubscribe) => {
+            let channels = result
+                .as_array()
+                .ok_or_else(|| {
+                    RouterParseError::MissingField("result (expected array)".to_string())
+                })?
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(String::from)
+                .collect();
+
+            match SubscriptionManagementAction::from_id(id) {
+                Some(Subscribe) => ParsedMessage::Subscribe { channels },
+                Some(Unsubscribe) => ParsedMessage::Unsubscribe { channels },
+                _ => unreachable!(),
+            }
+        }
+
+        Some(UnsubscribeAll) => {
+            let result_str = result
+                .as_str()
+                .ok_or_else(|| {
+                    RouterParseError::MissingField("result (expected string)".to_string())
+                })?
+                .to_string();
+            ParsedMessage::UnsubscribeAll { result: result_str }
+        }
+
+        Some(Test) => {
+            let version = result
+                .get("version")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| RouterParseError::MissingField("version".to_string()))?
+                .to_string();
+            ParsedMessage::Test { version }
+        }
+
+        None => {
+            warn!("⚠️ Unknown subscription management action ID: {}", id);
+            return Err(RouterParseError::InvalidSubscriptionManagementMessage(
+                parsed_message,
+            ));
+        }
+    };
+
+    Ok(message)
 }

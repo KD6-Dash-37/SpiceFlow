@@ -64,7 +64,7 @@ pub enum OrchestratorError {
     #[error("❌ UnsupportedFeedType: {feed_type}")]
     UnsupportedFeedType { feed_type: String },
     #[error("❌ Unsupportedexchange: {exchange}")]
-    UnsupportedExchange {exchange: Exchange},
+    UnsupportedExchange { exchange: Exchange },
 
     #[error("❌ {reason}")]
     TaskLogicError { reason: String },

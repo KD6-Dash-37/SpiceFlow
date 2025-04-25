@@ -58,8 +58,8 @@ impl OrderBookSide {
         actor: &'a mut DeribitOrderBookActor,
     ) -> &'a mut BTreeMap<OrderedFloat<f64>, f64> {
         match self {
-            OrderBookSide::Bids => &mut actor.bids,
-            &OrderBookSide::Asks => &mut actor.asks,
+            Self::Bids => &mut actor.bids,
+            Self::Asks => &mut actor.asks,
         }
     }
 }
@@ -82,11 +82,11 @@ pub enum OrderBookUpdate {
 impl fmt::Display for OrderBookUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let variant = match self {
-            OrderBookUpdate::New => "new",
-            OrderBookUpdate::Change => "change",
-            OrderBookUpdate::Delete => "delete",
+            Self::New => "new",
+            Self::Change => "change",
+            Self::Delete => "delete",
         };
-        write!(f, "{}", variant)
+        write!(f, "{variant}")
     }
 }
 
@@ -124,7 +124,8 @@ pub struct DeribitOrderBookActor {
 }
 
 impl DeribitOrderBookActor {
-    pub fn new(
+    #[must_use]
+    pub const fn new(
         actor_id: String,
         subscription: ExchangeSubscription,
         to_orch: mpsc::Sender<OrderBookMessage>,
@@ -147,6 +148,7 @@ impl DeribitOrderBookActor {
         }
     }
 
+    #[must_use]
     pub async fn run(mut self) {
         let span: tracing::Span = tracing::info_span!(
             "DeribitOrderBookActor",
@@ -179,7 +181,7 @@ impl DeribitOrderBookActor {
                         match self.process_market_data(raw) {
                             ProcessMessageResult::Ok => {
                                 if let Err(e) = self.send_processed_data().await {
-                                    error!("{}", e)
+                                    error!("{}", e);
                                 }
                             },
                             ProcessMessageResult::ErrRequiresResub(e) => {
@@ -195,10 +197,10 @@ impl DeribitOrderBookActor {
                     }
                 }
             }
-            info!("Shutting down")
+            info!("Shutting down");
         }
         .instrument(span)
-        .await
+        .await;
     }
 
     async fn send_hearbeat(&self) -> bool {
@@ -209,7 +211,7 @@ impl DeribitOrderBookActor {
             })
             .await
         {
-            Ok(_) => {
+            Ok(()) => {
                 info!("Sent hearbeat");
                 true
             }
@@ -229,12 +231,12 @@ impl DeribitOrderBookActor {
             }
         };
         match parsed.msg_type {
-            OrderBookMessageType::Snapshot => self.process_orderbook_snapshot(parsed),
-            OrderBookMessageType::Change => self.process_orderbook_change(parsed),
+            OrderBookMessageType::Snapshot => self.process_orderbook_snapshot(&parsed),
+            OrderBookMessageType::Change => self.process_orderbook_change(&parsed),
         }
     }
 
-    fn process_orderbook_snapshot(&mut self, data: RawOrderBookData) -> ProcessMessageResult {
+    fn process_orderbook_snapshot(&mut self, data: &RawOrderBookData) -> ProcessMessageResult {
         self.exchange_timestamp = Some(data.timestamp);
         for side in &[OrderBookSide::Bids, OrderBookSide::Asks] {
             let map = side.get_map(self);
@@ -251,11 +253,10 @@ impl DeribitOrderBookActor {
                         map.insert(price, entry.quantity);
                     }
                     other => {
-                        error!("Unexpected update type in snapshot: {:?}", other);
+                        error!("Unexpected update type in snapshot: {other}");
                         return ProcessMessageResult::ErrRequiresResub(
                             OrderBookActorError::ValidationError(format!(
-                                "Unexpected update type in snapshot: {:?}",
-                                other
+                                "Unexpected update type in snapshot: {other}"
                             )),
                         );
                     }
@@ -267,16 +268,13 @@ impl DeribitOrderBookActor {
         ProcessMessageResult::Ok
     }
 
-    fn process_orderbook_change(&mut self, data: RawOrderBookData) -> ProcessMessageResult {
+    fn process_orderbook_change(&mut self, data: &RawOrderBookData) -> ProcessMessageResult {
         if self.waiting_for_snapshot {
             return ProcessMessageResult::ErrNoResub(OrderBookActorError::UnwantedOrderBookChange);
         }
 
-        if let Err(err) = self.check_prev_change_id(&data) {
-            error!(
-                "Could not validate prev_change_id on orderbook update: {:?}",
-                err
-            );
+        if let Err(err) = self.check_prev_change_id(data) {
+            error!("Could not validate prev_change_id on orderbook update: {err}");
             return ProcessMessageResult::ErrRequiresResub(err);
         }
         self.exchange_timestamp = Some(data.timestamp);

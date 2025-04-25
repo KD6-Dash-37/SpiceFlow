@@ -19,19 +19,26 @@ use crate::templates::order_book_generated::{
 };
 
 pub trait ZmqSocketInterface {
+    /// A simple interface for sending data through a ZMQ socket.
+    ///
+    /// Intended to abstract `ZeroMQ` socket behavior for testing or alternative implementations.
+    ///
+    /// # Errors
+    /// Returns an error string if the send operation fails.
     fn send(&self, data: &[u8], flags: i32) -> Result<(), String>;
 }
 
 impl ZmqSocketInterface for zmq::Socket {
     fn send(&self, data: &[u8], flags: i32) -> Result<(), String> {
         self.send(data, flags)
-            .map_err(|e| format!("ZeroMQ send error: {:?}", e))
+            .map_err(|e| format!("ZeroMQ send error: {e}"))
     }
 }
 
 const DEFAULT_BUILDER_POOL_SIZE: usize = 10;
 const BROADCAST_ACTOR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
+#[allow(clippy::module_name_repetitions)]
 #[derive(Debug, Error)]
 pub enum BroadcastError {
     #[error("Serialisation failed: {0}")]
@@ -42,6 +49,7 @@ pub enum BroadcastError {
     SendData(String),
 }
 
+#[allow(clippy::module_name_repetitions)]
 pub struct BroadcastActor {
     actor_id: String,
     zmq_sender: mpsc::Sender<(String, Vec<u8>)>,
@@ -52,6 +60,15 @@ pub struct BroadcastActor {
 }
 
 impl BroadcastActor {
+    /// Constructs a new `BroadcastActor` with its associated channels and spawns a ZMQ publisher thread.
+    ///
+    /// Initializes the internal '`ZeroMQ`' PUB socket and begins forwarding messages received via `zmq_sender`.
+    /// Intended for development and prototyping; structure and behavior may change.
+    ///
+    /// # Panics
+    /// Panics if the ZMQ socket cannot be created or bound, or if the publisher thread fails to spawn.
+    #[allow(clippy::cognitive_complexity)]
+    #[must_use]
     pub fn new(
         actor_id: String,
         zmq_port: u16,
@@ -68,11 +85,14 @@ impl BroadcastActor {
                 let socket = context
                     .socket(zmq::PUB)
                     .expect("❌ Failed to create ZeroMQ PUB socket");
-                let endpoint = format!("tcp://*:{}", zmq_port);
+
+                let endpoint = format!("tcp://*:{zmq_port}");
+
                 socket
                     .bind(&endpoint)
                     .expect("❌ Failed to bind ZeroMQ PUB socket");
                 info!("📡 ZeroMQ PUB socket bound to {}", endpoint);
+
                 while let Some((topic, payload)) = zmq_receiver.blocking_recv() {
                     if let Err(e) = socket.send(topic.as_bytes(), zmq::SNDMORE) {
                         error!("❌ ZMQ topic send failed: {e}");
@@ -117,7 +137,7 @@ impl BroadcastActor {
                         match self.serialise_market_data(&data).await {
                             Ok(payload) => {
                                 match self.broadcast_data(data.topic(), payload).await {
-                                    Ok(_) => {}
+                                    Ok(()) => {}
                                     Err(e) => {
                                         warn!("Could not broadcast data: {}", e);
                                     }
@@ -142,7 +162,7 @@ impl BroadcastActor {
             }
         }
         .instrument(span)
-        .await
+        .await;
     }
 
     async fn send_heartbeat(&self) -> bool {
@@ -153,7 +173,7 @@ impl BroadcastActor {
             })
             .await
         {
-            Ok(_) => {
+            Ok(()) => {
                 info!("Sent heartbeat");
                 true
             }
@@ -166,7 +186,7 @@ impl BroadcastActor {
 
     async fn broadcast_data(&self, topic: &str, payload: Vec<u8>) -> Result<(), BroadcastError> {
         match self.zmq_sender.send((topic.to_string(), payload)).await {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(e) => Err(BroadcastError::SendData(format!(
                 "Failed to send over ZMQ channel: {e}"
             ))),
@@ -244,6 +264,7 @@ pub struct BuilderPool {
 }
 
 impl BuilderPool {
+    #[must_use]
     pub fn new(initial_size: usize) -> Self {
         let builders = (0..initial_size)
             .map(|_| FlatBufferBuilder::new())

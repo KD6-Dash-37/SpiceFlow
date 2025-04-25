@@ -3,13 +3,6 @@
 // 🧠 Internal modules
 use crate::model::{Exchange, InstrumentType};
 
-#[derive(Debug, Clone)]
-pub struct Instrument {
-    pub internal_symbol: String,
-    pub exchange_symbol: String,
-    // add more fields as needed (e.g. tick_size, contract_size, etc.)
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum RefDataError {
     #[error("Failed to fetch ref data from exchange")]
@@ -34,16 +27,4 @@ pub enum RefDataError {
     InstrumentNotFound(String),
     #[error("Request: {request}, expected: {expected}")]
     InstrumentMismatch { request: String, expected: String },
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum SubscriptionError {
-    #[error("Unknown exchange")]
-    UnknownExchange,
-    #[error("Invalid instrument type: {0}")]
-    InvalidInstrumentType(String),
-    #[error("Invalid feed")]
-    InvalidFeed,
-    #[error("Instrument not found")]
-    InstrumentNotFound,
 }

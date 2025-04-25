@@ -20,18 +20,18 @@ pub enum WorkflowKind {
     #[cfg(feature = "dev-ws-only")]
     WebSocketOnlySubscribe,
     #[cfg(feature = "dev-ws-only")]
-    WebSocketOnlyUnsubscribe
+    WebSocketOnlyUnsubscribe,
 }
 
 impl fmt::Display for WorkflowKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WorkflowKind::Subscribe => write!(f, "Subscribe"),
-            WorkflowKind::Unsubscribe => write!(f, "Unsubscribe"),
+            Self::Subscribe => write!(f, "Subscribe"),
+            Self::Unsubscribe => write!(f, "Unsubscribe"),
             #[cfg(feature = "dev-ws-only")]
-            WorkflowKind::WebSocketOnlySubscribe => write!(f, "DEV-WebSocketOnlySubscribe"),
+            Self::WebSocketOnlySubscribe => write!(f, "DEV-WebSocketOnlySubscribe"),
             #[cfg(feature = "dev-ws-only")]
-            WorkflowKind::WebSocketOnlyUnsubscribe => write!(f, "DEV-WebSocketOnlyUnsubscribe"),
+            Self::WebSocketOnlyUnsubscribe => write!(f, "DEV-WebSocketOnlyUnsubscribe"),
         }
     }
 }
@@ -49,7 +49,7 @@ impl fmt::Display for Workflow {
 }
 
 impl Workflow {
-    pub fn new(subscription: ExchangeSubscription, kind: WorkflowKind) -> Self {
+    pub const fn new(subscription: ExchangeSubscription, kind: WorkflowKind) -> Self {
         Self {
             subscription,
             kind,
@@ -99,17 +99,17 @@ impl Workflow {
                     exchange: self.subscription.exchange,
                 }),
                 1 => Some(OrchestratorTask::SubscribeWebSocket {
-                    subscription: self.subscription.clone()
+                    subscription: self.subscription.clone(),
                 }),
                 _ => None,
             },
             #[cfg(feature = "dev-ws-only")]
             WorkflowKind::WebSocketOnlyUnsubscribe => match self.step {
                 0 => Some(OrchestratorTask::UnsubscribeWebSocket {
-                    subscription: self.subscription.clone()
+                    subscription: self.subscription.clone(),
                 }),
                 _ => None,
-            }
+            },
         }
     }
 
@@ -145,48 +145,48 @@ pub enum OrchestratorTask {
 impl fmt::Display for OrchestratorTask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            OrchestratorTask::CreateOrderBook { subscription } => write!(
+            Self::CreateOrderBook { subscription } => write!(
                 f,
                 "OrchestratorTask::Unsubscribe {}",
                 subscription.stream_id
             ),
-            OrchestratorTask::OrderBookCreated { subscription } => write!(
+            Self::OrderBookCreated { subscription } => write!(
                 f,
                 "OrchestratorTask::OrderBookCreated {}",
                 subscription.stream_id
             ),
-            OrchestratorTask::CreateRouterIfNeeded { exchange } => {
-                write!(f, "OrchestratorTask::CreateRouterIfNeeded {}", exchange)
+            Self::CreateRouterIfNeeded { exchange } => {
+                write!(f, "OrchestratorTask::CreateRouterIfNeeded {exchange}")
             }
-            OrchestratorTask::CreateBroadcastActorIfNeeded => {
+            Self::CreateBroadcastActorIfNeeded => {
                 write!(f, "OrchestratorTask::CreateBroadcastActorIfNeeded")
             }
-            OrchestratorTask::SubscribeRouter { subscription } => write!(
+            Self::SubscribeRouter { subscription } => write!(
                 f,
                 "OrchestratorTask::SubscribeRouter {}",
                 subscription.stream_id
             ),
-            OrchestratorTask::SubscribeWebSocket { subscription } => write!(
+            Self::SubscribeWebSocket { subscription } => write!(
                 f,
                 "OrchestratorTask::SubscribeWebSocket {}",
                 subscription.stream_id
             ),
-            OrchestratorTask::WebSocketSubscribed { subscription } => write!(
+            Self::WebSocketSubscribed { subscription } => write!(
                 f,
                 "OrchestratorTask::WebSocketSubscribed {}",
                 subscription.stream_id
             ),
-            OrchestratorTask::UnsubscribeWebSocket { subscription } => write!(
+            Self::UnsubscribeWebSocket { subscription } => write!(
                 f,
                 "OrchestratorTask::UnsubscribeWebSocket {}",
                 subscription.stream_id
             ),
-            OrchestratorTask::UnsubscribeRouter { subscription } => write!(
+            Self::UnsubscribeRouter { subscription } => write!(
                 f,
                 "OrchestratorTask::UnsubscribeRouter {}",
                 subscription.stream_id
             ),
-            OrchestratorTask::TeardownOrderBook { subscription } => write!(
+            Self::TeardownOrderBook { subscription } => write!(
                 f,
                 "OrchestratorTask::TeardownOrderBook {}",
                 subscription.stream_id
@@ -195,10 +195,11 @@ impl fmt::Display for OrchestratorTask {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 impl OrchestratorTask {
     pub async fn poll(self, orch: &mut Orchestrator) -> TaskOutcome {
         match self {
-            OrchestratorTask::CreateRouterIfNeeded { exchange } => {
+            Self::CreateRouterIfNeeded { exchange } => {
                 if let Some(router_meta) = orch
                     .routers
                     .values()
@@ -219,15 +220,14 @@ impl OrchestratorTask {
                 }
             }
 
-            OrchestratorTask::CreateOrderBook { subscription } => {
-                let broadcast_actor_id = match orch
+            Self::CreateOrderBook { subscription } => {
+                let Some(broadcast_actor_id) = orch
                     .broadcast_actors
                     .values()
                     .next()
                     .map(|meta| meta.actor_id.clone())
-                {
-                    Some(id) => id,
-                    None => return TaskOutcome::Error(OrchestratorError::BroadcastActorMissing),
+                else {
+                    return TaskOutcome::Error(OrchestratorError::BroadcastActorMissing);
                 };
 
                 if let Err(e) = orch.create_orderbook_actor(&subscription, &broadcast_actor_id) {
@@ -236,7 +236,7 @@ impl OrchestratorTask {
                 TaskOutcome::Complete
             }
 
-            OrchestratorTask::OrderBookCreated { subscription } => {
+            Self::OrderBookCreated { subscription } => {
                 match orch
                     .orderbooks
                     .values()
@@ -257,7 +257,7 @@ impl OrchestratorTask {
                 }
             }
 
-            OrchestratorTask::CreateBroadcastActorIfNeeded => {
+            Self::CreateBroadcastActorIfNeeded => {
                 if let Some(meta) = orch.broadcast_actors.values().next() {
                     return if meta.is_ready() {
                         TaskOutcome::Complete
@@ -269,15 +269,14 @@ impl OrchestratorTask {
                 TaskOutcome::Pending
             }
 
-            OrchestratorTask::SubscribeRouter { subscription } => {
-                let router_actor_id = match orch
+            Self::SubscribeRouter { subscription } => {
+                let Some(router_actor_id) = orch
                     .routers
                     .iter()
                     .find(|(_, meta)| meta.exchange == subscription.exchange)
                     .map(|(id, _)| id.clone())
-                {
-                    Some(id) => id,
-                    None => return TaskOutcome::Error(OrchestratorError::RouterActorMissing),
+                else {
+                    return TaskOutcome::Error(OrchestratorError::RouterActorMissing);
                 };
                 if let Err(e) = orch.subscribe_router(&router_actor_id, &subscription).await {
                     TaskOutcome::Error(e)
@@ -286,28 +285,21 @@ impl OrchestratorTask {
                 }
             }
 
-            OrchestratorTask::SubscribeWebSocket { subscription } => {
-                let ws_actor_id = match orch.get_available_websocket() {
-                    Some(ws_id) => ws_id,
-                    None => {
-                        let router_actor_id = match orch
-                            .routers
-                            .iter()
-                            .find(|(_, meta)| meta.exchange == subscription.exchange)
-                            .map(|(id, _)| id.clone())
-                        {
-                            Some(id) => id,
-                            None => {
-                                return TaskOutcome::Error(OrchestratorError::RouterActorMissing)
-                            }
-                        };
-
-                        match orch
-                            .create_websocket_actor(&subscription.exchange, &router_actor_id)
-                        {
-                            Ok(new_id) => new_id,
-                            Err(e) => return TaskOutcome::Error(e),
-                        }
+            Self::SubscribeWebSocket { subscription } => {
+                let ws_actor_id = if let Some(ws_id) = orch.get_available_websocket() {
+                    ws_id
+                } else {
+                    let Some(router_actor_id) = orch
+                        .routers
+                        .iter()
+                        .find(|(_, meta)| meta.exchange == subscription.exchange)
+                        .map(|(id, _)| id.clone())
+                    else {
+                        return TaskOutcome::Error(OrchestratorError::RouterActorMissing);
+                    };
+                    match orch.create_websocket_actor(&subscription.exchange, &router_actor_id) {
+                        Ok(new_id) => new_id,
+                        Err(e) => return TaskOutcome::Error(e),
                     }
                 };
 
@@ -315,12 +307,12 @@ impl OrchestratorTask {
                     .subscribe_websocket(&ws_actor_id, subscription.clone())
                     .await
                 {
-                    Ok(_) => TaskOutcome::Complete,
+                    Ok(()) => TaskOutcome::Complete,
                     Err(e) => TaskOutcome::Error(e),
                 }
             }
 
-            OrchestratorTask::WebSocketSubscribed { subscription } => {
+            Self::WebSocketSubscribed { subscription } => {
                 match orch.websockets.iter().find(|(_actor_id, meta)| {
                     meta.subscribed_streams
                         .contains_key(&subscription.stream_id)
@@ -330,8 +322,8 @@ impl OrchestratorTask {
                 }
             }
 
-            OrchestratorTask::UnsubscribeWebSocket { subscription } => {
-                let ws_actor_id = match orch
+            Self::UnsubscribeWebSocket { subscription } => {
+                let Some(ws_actor_id) = orch
                     .websockets
                     .values()
                     .find(|meta| {
@@ -339,18 +331,18 @@ impl OrchestratorTask {
                             .contains_key(&subscription.stream_id)
                     })
                     .map(|meta| meta.actor_id.clone())
-                {
-                    Some(id) => id,
-                    None => return TaskOutcome::Error(OrchestratorError::WebSocketActorMissing),
+                else {
+                    return TaskOutcome::Error(OrchestratorError::RouterActorMissing);
                 };
+
                 match orch.unsubscribe_websocket(&ws_actor_id, subscription).await {
-                    Ok(_) => TaskOutcome::Complete,
+                    Ok(()) => TaskOutcome::Complete,
                     Err(e) => TaskOutcome::Error(e),
                 }
             }
 
-            OrchestratorTask::UnsubscribeRouter { subscription } => {
-                let router_actor_id = match orch
+            Self::UnsubscribeRouter { subscription } => {
+                let Some(router_actor_id) = orch
                     .routers
                     .values()
                     .find(|meta| {
@@ -358,25 +350,28 @@ impl OrchestratorTask {
                             .contains_key(&subscription.stream_id)
                     })
                     .map(|meta| meta.actor_id.clone())
-                {
-                    Some(id) => id,
-                    None => return TaskOutcome::Error(OrchestratorError::RouterActorMissing),
+                else {
+                    return TaskOutcome::Error(OrchestratorError::RouterActorMissing);
                 };
+
                 match orch
                     .unsubscribe_router(&router_actor_id, &subscription)
                     .await
                 {
-                    Ok(_) => TaskOutcome::Complete,
+                    Ok(()) => TaskOutcome::Complete,
                     Err(e) => TaskOutcome::Error(e),
                 }
             }
 
-            OrchestratorTask::TeardownOrderBook { subscription } => {
+            Self::TeardownOrderBook { subscription } => {
                 let Some(orderbook_actor_id) = orch
                     .orderbooks
                     .iter()
                     .find(|(_, meta)| meta.subscription.stream_id == subscription.stream_id)
-                    .map(|(key, _)| key.clone()) else { return TaskOutcome::Error(OrchestratorError::OrderBookActorMissing) };
+                    .map(|(key, _)| key.clone())
+                else {
+                    return TaskOutcome::Error(OrchestratorError::OrderBookActorMissing);
+                };
 
                 match orch
                     .teardown_orderbook_actor(&orderbook_actor_id, &subscription)

@@ -2,23 +2,65 @@
 
 // 📦 External crates
 use async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::debug;
 use url::Url;
 
 // 🧠 Internal modules
 use super::types::RefDataError;
-use crate::domain::instrument::{DeribitInstrument, ExchangeInstruments, Instrument};
-use crate::domain::ref_data::ExchangeRefDataProvider;
+use super::{ExchangeInstruments, ExchangeRefDataProvider, Instrument};
 use crate::domain::ExchangeSubscription;
 use crate::http_api::SubscriptionRequest;
 use crate::model::InstrumentType;
+
+const KIND_FUTURE: &str = "future";
+const KIND_SPOT: &str = "spot";
+const TYPE_REVERSED: &str = "reversed";
+const TYPE_LINEAR: &str = "linear";
+const SETTLEMENT_PERPETUAL: &str = "perpetual";
+
+#[allow(clippy::module_name_repetitions)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct DeribitInstrument {
+    pub instrument_name: String,
+    pub kind: String,
+    pub instrument_type: Option<String>,
+    pub settlement_period: Option<String>,
+    pub base_currency: String,
+    pub quote_currency: String,
+}
+
+impl DeribitInstrument {
+    pub fn infer_type(&self) -> Option<InstrumentType> {
+        match self.kind.as_str() {
+            KIND_SPOT => Some(InstrumentType::Spot),
+            KIND_FUTURE => {
+                match (
+                    self.instrument_type.as_deref(),
+                    self.settlement_period.as_deref(),
+                ) {
+                    (Some(TYPE_REVERSED), Some(SETTLEMENT_PERPETUAL)) => {
+                        Some(InstrumentType::InvPerp)
+                    }
+                    (Some(TYPE_LINEAR), Some(SETTLEMENT_PERPETUAL)) => {
+                        Some(InstrumentType::LinPerp)
+                    }
+                    (Some(TYPE_REVERSED), _) => Some(InstrumentType::InvFut),
+                    (Some(TYPE_LINEAR), _) => Some(InstrumentType::LinFut),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct DeribitGetInstrumentsResponse {
     result: Vec<DeribitInstrument>,
 }
 
+#[allow(clippy::module_name_repetitions)]
 pub struct DeribitRefData {
     client: reqwest::Client,
 }
@@ -37,7 +79,7 @@ impl ExchangeRefDataProvider for DeribitRefData {
         &self,
         request: &SubscriptionRequest,
     ) -> Result<ExchangeInstruments, RefDataError> {
-        let kind = instrument_type_to_deribit_kind(&request.instrument_type);
+        let kind = instrument_type_to_deribit_kind(request.instrument_type);
 
         let mut url = Url::parse("https://www.deribit.com/api/v2/public/get_instruments")
             .expect("Invalid base URL");
@@ -133,7 +175,7 @@ impl ExchangeRefDataProvider for DeribitRefData {
     }
 }
 
-const fn instrument_type_to_deribit_kind(instrument_type: &InstrumentType) -> &'static str {
+const fn instrument_type_to_deribit_kind(instrument_type: InstrumentType) -> &'static str {
     match instrument_type {
         InstrumentType::InvFut
         | InstrumentType::LinFut

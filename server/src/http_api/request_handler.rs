@@ -1,10 +1,10 @@
 // server/src/http_api/request_handler.rs
 
-// 🌍 Standard library
+// 🌍 Standard Library
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-// 📦 External crates
+// 📦 External Crates
 use axum::{
     extract::State,
     http::StatusCode,
@@ -17,13 +17,13 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-// 🧠 Internal moduless
-use crate::domain::ref_data::{ExchangeRefDataProvider, RefDataService};
-use crate::domain::subscription::ExchangeSubscription;
+// 🧠 Internal Modules
 use crate::async_actors::orchestrator::OrchestratorError;
+use crate::domain::ExchangeSubscription;
+use crate::domain::{ExchangeRefDataProvider, RefDataService};
 
-use super::requests::{RawSubscriptionRequest, SubscriptionRequest};
-
+// 🔧 Local Modules
+use super::{RawSubscriptionRequest, SubscriptionRequest};
 
 #[derive(Debug, Clone)]
 pub enum SubscriptionAction {
@@ -56,18 +56,13 @@ impl OrchHandle {
     }
 }
 
-
-
 #[derive(Clone)]
 pub struct AppState {
     pub orchestrator_handle: OrchHandle,
     pub ref_data: Arc<RefDataService>,
 }
 
-pub async fn start_http_server(
-    orchestrator_handle: OrchHandle,
-    ref_data: Arc<RefDataService>,
-) {
+pub async fn start_http_server(orchestrator_handle: OrchHandle, ref_data: Arc<RefDataService>) {
     let state = AppState {
         orchestrator_handle,
         ref_data,
@@ -84,7 +79,7 @@ pub async fn start_http_server(
             error!("❌ Failed to bind address {}: {}", addr, e);
             return;
         }
-    };    
+    };
     info!("📡 HTTP server listening on http://{}", addr);
     match serve(listener, app).await {
         Ok(()) => (),

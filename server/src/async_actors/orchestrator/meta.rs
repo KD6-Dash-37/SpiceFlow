@@ -45,7 +45,7 @@ impl WebSocketMetadata {
         }
     }
 
-    pub fn is_ready(&self) -> bool {
+    pub const fn is_ready(&self) -> bool {
         self.last_heartbeat.is_some()
     }
 }
@@ -79,7 +79,7 @@ impl RouterMetadata {
         }
     }
 
-    pub fn is_ready(&self) -> bool {
+    pub const fn is_ready(&self) -> bool {
         self.last_heartbeat.is_some()
     }
 }
@@ -94,7 +94,7 @@ pub struct OrderBookMetadata {
 }
 
 impl OrderBookMetadata {
-    pub fn new(
+    pub const fn new(
         actor_id: String,
         subscription: ExchangeSubscription,
         orderbook_command_sender: mpsc::Sender<OrderBookCommand>,
@@ -111,7 +111,7 @@ impl OrderBookMetadata {
         }
     }
 
-    pub fn is_ready(&self) -> bool {
+    pub const fn is_ready(&self) -> bool {
         self.last_heartbeat.is_some()
     }
 }
@@ -125,7 +125,7 @@ pub struct BroadcastActorMetadata {
 }
 
 impl BroadcastActorMetadata {
-    pub fn new(
+    pub const fn new(
         actor_id: String,
         market_data_sender: mpsc::Sender<ProcessedMarketData>,
         command_sender: mpsc::Sender<BroadcastActorCommand>,
@@ -140,7 +140,7 @@ impl BroadcastActorMetadata {
         }
     }
 
-    pub fn is_ready(&self) -> bool {
+    pub const fn is_ready(&self) -> bool {
         self.last_heartbeat.is_some()
     }
 }

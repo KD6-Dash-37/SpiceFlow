@@ -4,23 +4,21 @@
 use futures_util::stream::{SplitSink, SplitStream, StreamExt};
 use futures_util::SinkExt;
 use tokio::sync::mpsc;
-use tokio_tungstenite::{
-    connect_async,
-    tungstenite::protocol::Message,
-    MaybeTlsStream, WebSocketStream,
-};
 use tokio::time::{self, timeout, Duration};
+use tokio_tungstenite::{
+    connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
+};
 use tracing::{debug, error, info, warn, Instrument};
 
 // 🧠 Internal Crates / Modules
-use crate::async_actors::messages::{WebSocketCommand, ExchangeMessage};
-use crate::domain::ExchangeSubscription;
 use super::{WebSocketActorError, WebSocketMessage};
+use crate::async_actors::messages::{ExchangeMessage, WebSocketCommand};
+use crate::domain::ExchangeSubscription;
 // 🔧 Type Definitions
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 const WEBSOCKET_HEARTBEAT_INTERVAL: u64 = 5;
-const BINANCE_SPOT_WS_URL: &str = "wss://stream.binance.com:9443/stream"; 
+const BINANCE_SPOT_WS_URL: &str = "wss://stream.binance.com:9443/stream";
 
 #[derive(Debug)]
 pub enum SubscriptionManagementAction {
@@ -29,29 +27,29 @@ pub enum SubscriptionManagementAction {
 }
 
 impl SubscriptionManagementAction {
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(&self) -> &'static str {
         match self {
-            SubscriptionManagementAction::Subscribe => "SUBSCRIBE",
-            SubscriptionManagementAction::Unsubscribe => "UNSUBSCRIBE",
+            Self::Subscribe => "SUBSCRIBE",
+            Self::Unsubscribe => "UNSUBSCRIBE",
         }
     }
-    fn as_id(&self) -> u64 {
+    const fn as_id(&self) -> u64 {
         match self {
-            SubscriptionManagementAction::Subscribe => 1,
-            SubscriptionManagementAction::Unsubscribe => 2,
+            Self::Subscribe => 1,
+            Self::Unsubscribe => 2,
         }
     }
     #[allow(dead_code)] // will be used once the Router is implemented
-    pub fn from_id(id: u64) -> Option<Self> {
+    pub const fn from_id(id: u64) -> Option<Self> {
         match id {
-            1 => Some(SubscriptionManagementAction::Subscribe),
-            2 => Some(SubscriptionManagementAction::Unsubscribe),
+            1 => Some(Self::Subscribe),
+            2 => Some(Self::Unsubscribe),
             _ => None,
         }
     }
 }
 
-
+#[allow(clippy::module_name_repetitions)]
 pub struct BinanceWebSocketActor {
     actor_id: String,
     command_receiver: mpsc::Receiver<WebSocketCommand>,
@@ -63,7 +61,7 @@ pub struct BinanceWebSocketActor {
 }
 
 impl BinanceWebSocketActor {
-    pub fn new(
+    pub const fn new(
         actor_id: String,
         command_receiver: mpsc::Receiver<WebSocketCommand>,
         to_orch: mpsc::Sender<WebSocketMessage>,
@@ -88,18 +86,17 @@ impl BinanceWebSocketActor {
         async move {
             let mut heartbeat_interval =
                 time::interval(Duration::from_secs(WEBSOCKET_HEARTBEAT_INTERVAL));
-            
 
             if let Err(e) = self.connect_to_exchange().await {
                 self.send_error_to_orch(e).await;
             }
-            
+
             loop {
                 tokio::select! {
                     _ = heartbeat_interval.tick() => {
                         self.send_heartbeat().await;
                     }
-                    
+
                     Some(msg_result) = async {
                         if let Some(read) = self.read.as_mut() {
                             read.next().await
@@ -126,26 +123,20 @@ impl BinanceWebSocketActor {
             }
         }
         .instrument(span)
-        .await
+        .await;
     }
 
     async fn handle_command(&mut self, command: WebSocketCommand) -> bool {
         match command {
-            WebSocketCommand::Subscribe(sub) => {
+            WebSocketCommand::Subscribe(sub) | WebSocketCommand::Resubscribe(sub) => {
                 if let Err(e) = self.subscribe(sub).await {
                     self.send_error_to_orch(e).await;
                 }
-                
+
                 true
             }
             WebSocketCommand::Unsubscribe(sub) => {
                 if let Err(e) = self.unsubscribe(sub).await {
-                    self.send_error_to_orch(e).await;
-                }
-                true
-            }
-            WebSocketCommand::Resubscribe(sub) => {
-                if let Err(e) = self.subscribe(sub).await {
                     self.send_error_to_orch(e).await;
                 }
                 true
@@ -165,7 +156,7 @@ impl BinanceWebSocketActor {
             })
             .await
         {
-            Ok(_) => {
+            Ok(()) => {
                 debug!("sent heartbeat"); // TODO convert to metric
                 true
             }
@@ -182,10 +173,8 @@ impl BinanceWebSocketActor {
     ) -> Result<(), WebSocketActorError> {
         info!("Subscribing to {}", subscription.exchange_stream_id);
         let streams = vec![subscription.exchange_stream_id];
-        let message = build_binance_subscription_message(
-            &streams,
-            SubscriptionManagementAction::Subscribe
-        );
+        let message =
+            build_binance_subscription_message(&streams, &SubscriptionManagementAction::Subscribe);
         self.send_to_exchange(message).await?;
         Ok(())
     }
@@ -198,19 +187,16 @@ impl BinanceWebSocketActor {
         let streams = vec![subscription.exchange_stream_id];
         let message = build_binance_subscription_message(
             &streams,
-            SubscriptionManagementAction::Unsubscribe
+            &SubscriptionManagementAction::Unsubscribe,
         );
         self.send_to_exchange(message).await?;
         Ok(())
     }
 
-    async fn send_to_exchange(
-        &mut self,
-        message: String
-    ) -> Result<(), WebSocketActorError> {
+    async fn send_to_exchange(&mut self, message: String) -> Result<(), WebSocketActorError> {
         if let Some(write) = &mut self.write {
             match write.send(Message::Text(message.clone().into())).await {
-                Ok(_) => {
+                Ok(()) => {
                     info!("Successfully sent message to exchange: {:?}", message);
                     Ok(())
                 }
@@ -226,16 +212,23 @@ impl BinanceWebSocketActor {
     }
 
     async fn send_error_to_orch(&self, error: WebSocketActorError) {
-        if let Err(send_err) = self.to_orch.send(WebSocketMessage::Error {
-            actor_id: self.actor_id.clone(),
-            error,
-        }).await {
+        if let Err(send_err) = self
+            .to_orch
+            .send(WebSocketMessage::Error {
+                actor_id: self.actor_id.clone(),
+                error,
+            })
+            .await
+        {
             error!("Failed to send error to orchestrator: {send_err}");
         }
     }
-    
+
     async fn teardown(&mut self) {
-        info!("🧹 BinanceWebSocketActor {}: initiating teardown...", self.actor_id);
+        info!(
+            "🧹 BinanceWebSocketActor {}: initiating teardown...",
+            self.actor_id
+        );
 
         if let Some(write) = &mut self.write {
             match timeout(Duration::from_secs(3), write.send(Message::Close(None))).await {
@@ -249,9 +242,13 @@ impl BinanceWebSocketActor {
 
         self.write.take();
         self.read.take();
-        if let Err(e) = self.to_orch.send(WebSocketMessage::Shutdown {
-            actor_id: self.actor_id.clone()
-        }).await {
+        if let Err(e) = self
+            .to_orch
+            .send(WebSocketMessage::Shutdown {
+                actor_id: self.actor_id.clone(),
+            })
+            .await
+        {
             error!("❌ Failed to notify orchestrator of shutdown: {e}");
         } else {
             info!("✅ Shutdown message sent to orchestrator");
@@ -262,7 +259,7 @@ impl BinanceWebSocketActor {
         info!("Connecting to Binance Spot WS: {}", BINANCE_SPOT_WS_URL);
         match connect_async(BINANCE_SPOT_WS_URL).await {
             Ok((stream, _)) => {
-                let(write, read) = stream.split();
+                let (write, read) = stream.split();
                 self.write = Some(write);
                 self.read = Some(read);
                 Ok(())
@@ -275,8 +272,10 @@ impl BinanceWebSocketActor {
     }
 }
 
-
-fn build_binance_subscription_message(streams: &[String], action: SubscriptionManagementAction) -> String {
+fn build_binance_subscription_message(
+    streams: &[String],
+    action: &SubscriptionManagementAction,
+) -> String {
     let payload = serde_json::json!({
         "method": action.as_str(),
         "params": streams,
